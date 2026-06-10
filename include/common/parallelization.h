@@ -8,6 +8,7 @@
 #define OCR_TBB_parallelization_H_GUARD
 
 #include <thread>
+#include <chrono>
 
 #define USE_TBB
 
@@ -20,13 +21,11 @@
 
 #if (USE_TBB)
 
-#include <tbb/task_scheduler_init.h>
 #include <tbb/task.h>
 #include <tbb/spin_mutex.h>
 #include <tbb/queuing_mutex.h>
 #include <tbb/scalable_allocator.h>
 #include <tbb/enumerable_thread_specific.h>
-#include <tbb/atomic.h>
 #include <tbb/concurrent_unordered_map.h>
 #include <tbb/task.h>
 #include <tbb/spin_mutex.h>
@@ -34,11 +33,10 @@
 #include <tbb/cache_aligned_allocator.h>
 #include <tbb/scalable_allocator.h>
 #include <tbb/enumerable_thread_specific.h>
-#include <tbb/atomic.h>
 #include <tbb/concurrent_unordered_map.h>
 #include <tbb/mutex.h>
-#include <tbb/tbb_thread.h>
 #include <tbb/concurrent_queue.h>
+#include <tbb/tick_count.h>
 #define TBB_PREVIEW_MEMORY_POOL 1
 #include <tbb/memory_pool.h>
 
@@ -52,7 +50,7 @@
 
 inline void sleep_seconds(double duration)
 {
-	tbb::this_tbb_thread::sleep(tbb::tick_count::interval_t(duration));
+	std::this_thread::sleep_for(std::chrono::duration<double>(duration));
 }
 
 

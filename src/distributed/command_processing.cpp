@@ -78,9 +78,9 @@ namespace ocr_tbb
 			}
 		}
 
-		struct pauser_task : public tbb::task
+		struct pauser_task
 		{
-			tbb::task* execute()
+			void operator()() const
 			{
 				ocr_tbb::distributed::thread_context ctxv
 #if (SIMULATE_MULTIPLE_NODES)
@@ -90,7 +90,6 @@ namespace ocr_tbb
 				ocr_tbb::distributed::thread_context *ctx = &ctxv;
 				runtime::pause(ctx);
 				communicator::send::CMD_paused(ctx, origin_);
-				return 0;
 			}
 			pauser_task(node_id origin
 #if (SIMULATE_MULTIPLE_NODES)
@@ -220,7 +219,7 @@ namespace ocr_tbb
 			}
 			case command_code::CMD_pause:
 			{
-				tbb::task::spawn(*new(tbb::task::allocate_additional_child_of(*runtime::get_barrier()))pauser_task(m.main.from
+				runtime::get_task_group()->run(pauser_task(m.main.from
 #if (SIMULATE_MULTIPLE_NODES)
 					, m.main.to
 #endif

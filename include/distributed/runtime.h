@@ -9,11 +9,34 @@
 
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
+#include <atomic>
+#include <vector>
+#include <tbb/task_group.h>
 
 namespace ocr_tbb
 {
 	namespace distributed
 	{
+		struct edt; // forward declaration for paused_task_entry
+
+		// Emulates the old empty "barrier task" whose reference count gated completion:
+		// each outstanding reference is a deferred task_handle holding task_group::wait()
+		// open until run or destroyed. Awaited cooperatively via task_group::wait().
+		struct task_barrier {
+			task_barrier(tbb::task_group& tg, int initial) : cursor_(initial) {
+				sentinels_.reserve(initial);
+				for (int i = 0; i < initial; ++i) sentinels_.push_back(tg.defer([]{}));
+			}
+			void decrement() {
+				int idx = --cursor_;
+				sentinels_[idx] = tbb::task_handle{};
+			}
+		private:
+			std::vector<tbb::task_handle> sentinels_;
+			std::atomic<int> cursor_;
+		};
+
+
 		struct binary_file_writer
 		{
 			binary_file_writer(thread_context* ctx, const char* name) : ctx(ctx)
@@ -99,7 +122,7 @@ namespace ocr_tbb
 				return res;
 			}
 			template<typename T>
-			void read_atomic(tbb::atomic<T>& x)
+			void read_atomic(std::atomic<T>& x)
 			{
 				x = read_val<T>();
 			}
@@ -144,24 +167,26 @@ namespace ocr_tbb
 		struct runtime
 		{
 #if (SIMULATE_MULTIPLE_NODES)
-			static tbb::task* get_barrier() { return runtimes_[0]->barrier_; }
-			static void set_barrier(tbb::task* b) { runtimes_[0]->barrier_ = b; }
+			static task_barrier* get_barrier() { return runtimes_[0]->barrier_; }
+			static void set_barrier(task_barrier* b) { runtimes_[0]->barrier_ = b; }
+			static tbb::task_group* get_task_group() { return runtimes_[0]->tg_; }
+			static void set_task_group(tbb::task_group* tg) { runtimes_[0]->tg_ = tg; }
 			static void shutdown(thread_context* ctx)
 			{
 				the(ctx).was_shut_down_ = true;
 				//if (compute_node::get_my_id() == 0) -- all "processes" take part in the shutdown, to make sure they are all ready to terminate
 				{
-					tbb::task* barrier = runtimes_[0]->barrier_;
-					if (barrier->decrement_ref_count() == 0) tbb::task::spawn(*barrier);
+					get_barrier()->decrement();
 				}
 			}
 #else
-			static tbb::task* get_barrier() { return the().barrier_; }
-			static void set_barrier(tbb::task* b) { the().barrier_ = b; }
+			static task_barrier* get_barrier() { return the().barrier_; }
+			static void set_barrier(task_barrier* b) { the().barrier_ = b; }
+			static tbb::task_group* get_task_group() { return the().tg_; }
+			static void set_task_group(tbb::task_group* tg) { the().tg_ = tg; }
 			static void shutdown(thread_context* ctx)
 			{
-				tbb::task* barrier = get_barrier();
-				if (barrier->decrement_ref_count() == 0) tbb::task::spawn(*barrier);
+				get_barrier()->decrement();
 			}
 #endif
 			static edt* get_current_task(thread_context* ctx) { return ctx->current_edt; }
@@ -192,14 +217,14 @@ namespace ocr_tbb
 				{
 					communicator::send::CMD_pause(ctx, i);
 				}
-				while (the(ctx).nodes_to_pause_.load()) tbb::this_tbb_thread::yield();
+				while (the(ctx).nodes_to_pause_.load()) std::this_thread::yield();
 				LOCKED_COUT(compute_node::get_my_id(ctx) << ": finished global pause");
 				the(ctx).nodes_to_pause_ = communicator::number_of_nodes();
 				for (node_id i = 0; i < communicator::number_of_nodes(); ++i)
 				{
 					communicator::send::CMD_start_flush(ctx, i);
 				}
-				while (the(ctx).nodes_to_pause_.load()) tbb::this_tbb_thread::yield();
+				while (the(ctx).nodes_to_pause_.load()) std::this_thread::yield();
 				LOCKED_COUT(compute_node::get_my_id(ctx) << ": finished global flush");
 			}
 			static void global_resume(thread_context* ctx)
@@ -220,7 +245,7 @@ namespace ocr_tbb
 			static void pause(thread_context* ctx)
 			{
 				the(ctx).is_paused_ = true;
-				while (runtime_state_observer::running_task_count(ctx) > 0) tbb::this_tbb_thread::yield();
+				while (runtime_state_observer::running_task_count(ctx) > 0) std::this_thread::yield();
 				//all running tasks are done now, no new tasks will be started, since setting is_paused_ forces them to be added to the paused_tasks_ list instead
 				LOCKED_COUT(compute_node::get_my_id(ctx) << ": paused");
 			}
@@ -234,10 +259,10 @@ namespace ocr_tbb
 				return the(ctx).is_paused_;
 			}
 			
-			static void add_paused_task(thread_context* ctx, tbb::task* t)
+			static void add_paused_task(thread_context* ctx, edt* task, tbb::task_handle handle)
 			{
 				//tbb::spin_mutex::scoped_lock lock(the().paused_tasks_mutex_);
-				the(ctx).paused_tasks_.push_back(t);
+				the(ctx).paused_tasks_.push_back({task, std::move(handle)});
 			}
 			static void add_paused_message(thread_context* ctx, command_processor::message* m)
 			{
@@ -251,7 +276,7 @@ namespace ocr_tbb
 				{
 					communicator::send::CMD_save(ctx, i);
 				}
-				while (the(ctx).nodes_to_pause_.load()) tbb::this_tbb_thread::yield();
+				while (the(ctx).nodes_to_pause_.load()) std::this_thread::yield();
 				LOCKED_COUT(compute_node::get_my_id(ctx) << ": finished global save");
 			}
 			static void notify_saved(thread_context* ctx, node_id node)
@@ -267,7 +292,7 @@ namespace ocr_tbb
 				{
 					communicator::send::CMD_load(ctx, i);
 				}
-				while (the(ctx).nodes_to_pause_.load()) tbb::this_tbb_thread::yield();
+				while (the(ctx).nodes_to_pause_.load()) std::this_thread::yield();
 				LOCKED_COUT(compute_node::get_my_id(ctx) << ": finished global load");
 			}
 			static void notify_loaded(thread_context* ctx, node_id node)
@@ -288,7 +313,7 @@ namespace ocr_tbb
 				for (paused_tasks_type::iterator it = the(ctx).paused_tasks_.begin(); it != the(ctx).paused_tasks_.end(); ++it)
 				{
 					runtime_state_observer::increment_running_task_count(ctx);
-					tbb::task::spawn(**it);
+					get_task_group()->run(std::move(it->handle));
 				}
 				the(ctx).paused_tasks_.clear();
 				for (paused_messages_type::iterator it = the(ctx).paused_messages_.begin(); it != the(ctx).paused_messages_.end(); ++it)
@@ -303,7 +328,7 @@ namespace ocr_tbb
 			{
 				the(ctx).barrier_done_ = false;
 				communicator::send::CMD_barrier(ctx, root);
-				while (the(ctx).barrier_done_.load() == false) tbb::this_tbb_thread::yield();
+				while (the(ctx).barrier_done_.load() == false) std::this_thread::yield();
 			}
 			static void notify_barrier(thread_context* ctx)
 			{
@@ -355,7 +380,7 @@ namespace ocr_tbb
 					{
 						std::size_t total_count = 0;
 						std::size_t total_size = 0;
-						for (tbb::concurrent_unordered_map<command, tbb::atomic<std::size_t> >::const_iterator cit = it->second.the.begin(); cit != it->second.the.end(); ++cit)
+						for (tbb::concurrent_unordered_map<command, std::atomic<std::size_t> >::const_iterator cit = it->second.the.begin(); cit != it->second.the.end(); ++cit)
 						{
 							command cmd = cit->first;
 							total_count += cit->second.load();
@@ -408,6 +433,7 @@ namespace ocr_tbb
 				the_object_cache_(number_of_nodes),
 				the_communicator_(comm),
 				barrier_(0),
+				tg_(nullptr),
 				is_paused_(false),
 				was_shut_down_(false)
 			{
@@ -422,15 +448,9 @@ namespace ocr_tbb
 				{
 					tbb::spin_mutex::scoped_lock lock(the(ctx).paused_tasks_mutex_);//the lock should only be necessary in the node faking mode
 					the(ctx).paused_messages_.clear();
-					for (paused_tasks_type::iterator it = the(ctx).paused_tasks_.begin(); it != the(ctx).paused_tasks_.end(); ++it)
-					{
-						(*it)->set_parent(0);//Unset the parent pointer, otherwise the destroy call would automatically perform decrement on the barrier.
-											 //In general, that is exactly what's supposed to happen, but for debugging reasons, we want to do it manually and check that
-											 //the value of the barrier's reference count is >0.
-						tbb::task::destroy(**it);
-						int c = get_barrier()->decrement_ref_count();
-						assert(c > 0);
-					}
+					// Paused tasks are discarded without execution. Destroying each deferred
+					// task_handle releases the wait reference it was holding, so clearing the
+					// container alone restores the barrier's reference count.
 					the(ctx).paused_tasks_.clear();
 				}
 				the(ctx).the_command_processor_.clear(ctx);
@@ -455,27 +475,29 @@ namespace ocr_tbb
 			communicator_base* the_communicator_;
 			runtime_state_observer the_state_observer_;
 		private:
-			tbb::task* barrier_;
+			task_barrier* barrier_;
+			tbb::task_group* tg_;
 			bool is_paused_;
 			bool was_shut_down_;
 			tbb::spin_mutex paused_tasks_mutex_;
-			typedef tbb::concurrent_vector<tbb::task*> paused_tasks_type;
+			struct paused_task_entry { edt* task; tbb::task_handle handle; };
+			typedef tbb::concurrent_vector<paused_task_entry> paused_tasks_type;
 			paused_tasks_type paused_tasks_;
 			typedef tbb::concurrent_vector<command_processor::message*> paused_messages_type;
 			paused_messages_type paused_messages_;
-			tbb::atomic<std::size_t> nodes_to_pause_;
-			tbb::atomic<largest_atomic_int_t> map_sequence_id_;
-			tbb::atomic<bool> barrier_done_;
-			tbb::atomic<largest_atomic_int_t> barrier_count_;
+			std::atomic<std::size_t> nodes_to_pause_;
+			std::atomic<largest_atomic_int_t> map_sequence_id_;
+			std::atomic<bool> barrier_done_;
+			std::atomic<largest_atomic_int_t> barrier_count_;
 			//the following "encapsulation" is done only to keep visual studio from complaining about the name being too long
 			struct message_count_type
 			{
-				tbb::concurrent_unordered_map<command, tbb::atomic<std::size_t> > the;
+				tbb::concurrent_unordered_map<command, std::atomic<std::size_t> > the;
 			};
 			tbb::concurrent_unordered_map<node_id, message_count_type> message_counts_;
 			struct message_size_type
 			{
-				tbb::concurrent_unordered_map<command, tbb::atomic<std::size_t> > the;
+				tbb::concurrent_unordered_map<command, std::atomic<std::size_t> > the;
 			};
 			tbb::concurrent_unordered_map<node_id, message_size_type> message_sizes_;
 #ifdef ENABLE_EXTENSION_HETEROGENEOUS_FUNCTIONS

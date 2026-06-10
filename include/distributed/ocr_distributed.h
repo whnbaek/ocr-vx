@@ -11,7 +11,7 @@
 #include <vector>
 #include <tbb/spin_mutex.h>
 #include <tbb/queuing_mutex.h>
-#include <tbb/atomic.h>
+#include <atomic>
 #include <tbb/concurrent_vector.h>
 #include <tbb/enumerable_thread_specific.h>
 #include <tbb/concurrent_hash_map.h>
@@ -432,7 +432,7 @@ namespace ocr_tbb
 							if (log_stream) (*log_stream) << "CMD_db_invalidate_copy(" << (*it) << ")" << std::endl;
 						}
 						parent->destroy__locked();
-						owner_data.master = owner_data.target_master;
+						owner_data.master.store(owner_data.target_master.load());
 					}
 					else
 					{
@@ -450,7 +450,7 @@ namespace ocr_tbb
 					assert(sender == owner_data.target_master);
 					assert(owner_data.target_master == owner_data.master_waitlist.front());
 					owner_data.master_waitlist.pop_front();
-					owner_data.master = owner_data.target_master;
+					owner_data.master.store(owner_data.target_master.load());
 					while (!owner_data.copy_waitlist.empty())
 					{
 						if (owner_data.copy_waitlist.front() != owner_data.master)
@@ -779,10 +779,10 @@ namespace ocr_tbb
 				}
 
 				//local locking on behalf of EDTs
-				tbb::atomic<u32> shared_read_locks;
-				tbb::atomic<u32> shared_write_locks;
-				tbb::atomic<u32> exclusive_locks;
-				tbb::atomic<bool> exclusive_write;
+				std::atomic<u32> shared_read_locks;
+				std::atomic<u32> shared_write_locks;
+				std::atomic<u32> exclusive_locks;
+				std::atomic<bool> exclusive_write;
 				waitlist_type waitlist;
 
 				struct owner_data_type
@@ -808,8 +808,8 @@ namespace ocr_tbb
 						r.read_vals(std::back_inserter(master_waitlist));
 						r.read_vals(std::back_inserter(copy_waitlist));
 					}
-					tbb::atomic<node_id> master;
-					tbb::atomic<node_id> target_master;
+					std::atomic<node_id> master;
+					std::atomic<node_id> target_master;
 					master_waitlist_type master_waitlist;
 					copy_waitlist_type copy_waitlist;
 				};
@@ -866,11 +866,11 @@ namespace ocr_tbb
 						r.read_vals(std::back_inserter(copy_waitlist));
 						r.read_atomic(state);
 					}
-					tbb::atomic<u32> pending_copies;
-					tbb::atomic<u32> pending_invalidations;
+					std::atomic<u32> pending_copies;
+					std::atomic<u32> pending_invalidations;
 					std::list<guid> tasks_waiting_for_invalidation;
 					copy_waitlist_type copy_waitlist;
-					tbb::atomic<master_state> state;
+					std::atomic<master_state> state;
 				};
 				master_data_type master_data;
 
@@ -902,7 +902,7 @@ namespace ocr_tbb
 					bool operator!=(command_processor::db_states::db_state other) const { return !((*this) == other); }
 					state_type& operator=(command_processor::db_states::db_state value) { set(value); return *this; }
 				private:
-					tbb::atomic<command_processor::db_states::db_state> state_;
+					std::atomic<command_processor::db_states::db_state> state_;
 					db::synchro_data& parent_;
 					state_type(db::synchro_data& parent) : parent_(parent) {}
 					friend struct synchro_data;
@@ -1272,7 +1272,7 @@ namespace ocr_tbb
 			bool triggered_;
 			bool destroyed_;
 			bool takes_arg_;
-			tbb::atomic<largest_atomic_int_t> latch_count_;
+			std::atomic<largest_atomic_int_t> latch_count_;
 			guid data_;
 			guid self_;
 			std::deque<guid> channel_in_queue_;
@@ -1436,10 +1436,10 @@ namespace ocr_tbb
 				handle_all_acquired__locked(ctx);
 			}
 
-			struct runner : public tbb::task
+			struct runner
 			{
 				runner(edt* task) : task_(task) {}
-				tbb::task* execute()
+				void operator()()
 				{
 					thread_context vctx
 #if (SIMULATE_MULTIPLE_NODES)
@@ -1451,7 +1451,6 @@ namespace ocr_tbb
 					task_->run(ctx);
 					runtime::set_current_task(ctx, 0);
 					runtime_state_observer::decrement_running_task_count(ctx);
-					return 0;
 				}
 				edt* get_ocr_task()
 				{
@@ -1477,16 +1476,20 @@ namespace ocr_tbb
 				state_ = ES_ready_to_spawn;
 				if (!ready_to_start_) return;
 				state_ = ES_spawning;
-				tbb::task* t = new (tbb::task::allocate_additional_child_of(*runtime::get_barrier()))runner(this);
 				runtime_state_observer::increment_running_task_count(ctx);
+				edt* self = this;
+				auto fn = [self]() {
+					runner r(self);
+					r();
+				};
 				if (runtime::is_paused(ctx))
 				{
-					runtime::add_paused_task(ctx, t);
+					runtime::add_paused_task(ctx, self, runtime::get_task_group()->defer(std::move(fn)));
 					runtime_state_observer::decrement_running_task_count(ctx);
 				}
 				else
 				{
-					tbb::task::spawn(*t);
+					runtime::get_task_group()->run(std::move(fn));
 				}
 			}
 
@@ -1882,7 +1885,7 @@ namespace ocr_tbb
 			std::vector<guid> ordered_guids_;
 			std::vector<access_mode_t> lock_modes_;
 			std::map<guid,buffer_handle_type> db_pointers_;
-			tbb::atomic<std::size_t> acquired_data_count_;
+			std::atomic<std::size_t> acquired_data_count_;
 
 			std::unordered_map<guid, group> groups_;
 			bool in_group_;
@@ -2006,8 +2009,7 @@ namespace ocr_tbb
 			w.template write_val<u64>("paused_task_count", the(w.ctx).paused_tasks_.size());
 			for (paused_tasks_type::iterator it = the(w.ctx).paused_tasks_.begin(); it != the(w.ctx).paused_tasks_.end(); ++it)
 			{
-				edt::runner* t = static_cast<edt::runner*>(*it);
-				w.write_val("paused_task_guid", t->get_ocr_task()->get_self());
+				w.write_val("paused_task_guid", it->task->get_self());
 			}
 			w.write_obj("command_processor", the(w.ctx).the_command_processor_);
 			w.write_obj("compute_node", the(w.ctx).the_compute_node_);
@@ -2044,7 +2046,11 @@ namespace ocr_tbb
 			the(r.ctx).the_object_cache_.read(r);
 			for (std::vector<guid>::iterator it = paused_task_guids.begin(); it != paused_task_guids.end(); ++it)
 			{
-				the(r.ctx).paused_tasks_.push_back(new(tbb::task::allocate_additional_child_of(*get_barrier()))edt::runner(guided::from_guid(r.ctx, *it)->as_edt()));
+				edt* edt_ptr = guided::from_guid(r.ctx, *it)->as_edt();
+				the(r.ctx).paused_tasks_.push_back({edt_ptr, runtime::get_task_group()->defer([edt_ptr]() {
+					edt::runner r_inner(edt_ptr);
+					r_inner();
+				})});
 			}
 #ifdef ENABLE_EXTENSION_HETEROGENEOUS_FUNCTIONS
 			r.read_vals(std::back_inserter(the(r.ctx).user_functions_));

@@ -82,6 +82,7 @@ namespace ocr_tbb
 			//return (get_index() / 16) % communicator::number_of_nodes();
 			return get_index() % communicator::number_of_nodes();
 		}
+		template node_id guid_template<32u>::get_mapped_node_id() const;
 
 
 		void object_repository::clear(thread_context* ctx)

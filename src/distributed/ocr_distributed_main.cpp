@@ -16,9 +16,11 @@ extern "C"
 
 #include "ocr_distributed.h"
 #include <cassert>
-#include <tbb/tbb_thread.h>
-#include <tbb/task.h>
-#include <tbb/task_scheduler_init.h>
+#include <atomic>
+#include <tbb/task_group.h>
+#include <oneapi/tbb/global_control.h>
+#include <oneapi/tbb/info.h>
+#include <chrono>
 
 
 #if (SIMULATE_MULTIPLE_NODES)
@@ -28,7 +30,7 @@ std::unique_ptr<ocr_tbb::distributed::runtime> ocr_tbb::distributed::runtime::th
 #endif
 std::vector<ocr_tbb::distributed::command_processor::descriptor*> ocr_tbb::distributed::command_processor::the_descriptors;
 #if(TRACK_LIVE_MESSAGES)
-tbb::atomic<std::size_t> ocr_tbb::distributed::command_processor::message::count_alive;
+std::atomic<std::size_t> ocr_tbb::distributed::command_processor::message::count_alive;
 tbb::concurrent_unordered_map<void*, int> ocr_tbb::distributed::command_processor::message::alive_map;
 #endif
 tbb::queuing_mutex cout_mutex;
@@ -184,7 +186,7 @@ struct host_info
 };
 void fill_host_info(host_info& hi)
 {
-	hi.threads = tbb::task_scheduler_init::default_num_threads();
+	hi.threads = (int)tbb::info::default_concurrency();
 	::gethostname(hi.name, sizeof(hi.name));
 	hi.name[sizeof(hi.name) - 1] = 0;
 }
@@ -233,7 +235,7 @@ namespace ocr_tbb
 					msg.followup_data.resize(sizeof(host_info));
 					fill_host_info(*(host_info*)(&msg.followup_data.front()));
 					command_processor::process_message(msg);
-					while (!queue.try_pop(msg)) { tbb::this_tbb_thread::yield(); }
+					while (!queue.try_pop(msg)) { std::this_thread::yield(); }
 					msg.followup_to_vector(host_infos);
 				}
 			}
@@ -313,94 +315,84 @@ ocrGuid_t test_edt(u32 paramc, u64* paramv, u32 depc, ocrEdtDep_t depv[])
 	return NULL_GUID;
 }
 
-struct barrier_task : public tbb::task
-{
-	tbb::task* execute()
-	{
-		return 0;
-	}
-};
-
 std::vector<char> arg_data;
 
-struct worker_start_task : public tbb::task
+static void worker_start_body()
 {
-	tbb::task* execute()
-	{
-		ocr_tbb::distributed::thread_context ctxv
+	ocr_tbb::distributed::thread_context ctxv
 #if (SIMULATE_MULTIPLE_NODES)
-			(0)
+		(0)
 #endif
-		;
-		ocr_tbb::distributed::thread_context *ctx = &ctxv;
-		ocr_tbb::distributed::runtime::set_barrier(new (allocate_continuation()) barrier_task());
-		ocr_tbb::distributed::runtime::get_barrier()->set_ref_count(1);
-		ocr_tbb::distributed::communicator::barrier(ctx, 0);
-		return 0;
-	}
-};
+	;
+	ocr_tbb::distributed::thread_context *ctx = &ctxv;
+	auto* tg = new tbb::task_group();
+	ocr_tbb::distributed::runtime::set_task_group(tg);
+	auto* b = new ocr_tbb::distributed::task_barrier(*tg, 1);
+	ocr_tbb::distributed::runtime::set_barrier(b);
+	ocr_tbb::distributed::communicator::barrier(ctx, 0);
+	tg->wait();
+}
 
-struct loader_task : public tbb::task
+static void loader_body()
 {
-	tbb::task* execute()
-	{
-		ocr_tbb::distributed::thread_context ctxv
+	ocr_tbb::distributed::thread_context ctxv
 #if (SIMULATE_MULTIPLE_NODES)
-			(0)
+		(0)
 #endif
-		;
-		ocr_tbb::distributed::thread_context *ctx = &ctxv;
-		ocr_tbb::distributed::runtime::set_barrier(new (allocate_continuation()) barrier_task());
+	;
+	ocr_tbb::distributed::thread_context *ctx = &ctxv;
+	auto* tg = new tbb::task_group();
+	ocr_tbb::distributed::runtime::set_task_group(tg);
 #if (SIMULATE_MULTIPLE_NODES)
-		ocr_tbb::distributed::runtime::get_barrier()->set_ref_count((int)ocr_tbb::distributed::communicator::number_of_nodes());
+	auto* b = new ocr_tbb::distributed::task_barrier(*tg, (int)ocr_tbb::distributed::communicator::number_of_nodes());
 #else
-		ocr_tbb::distributed::runtime::get_barrier()->set_ref_count(1);
+	auto* b = new ocr_tbb::distributed::task_barrier(*tg, 1);
 #endif
-		ocr_tbb::distributed::runtime::global_pause(ctx);
-		ocr_tbb::distributed::runtime::global_load(ctx);
-		ocr_tbb::distributed::runtime::global_resume(ctx);
-		return 0;
-	}
-};
+	ocr_tbb::distributed::runtime::set_barrier(b);
+	ocr_tbb::distributed::runtime::global_pause(ctx);
+	ocr_tbb::distributed::runtime::global_load(ctx);
+	ocr_tbb::distributed::runtime::global_resume(ctx);
+	tg->wait();
+}
 
-struct launcher_task : public tbb::task
+static void launcher_body()
 {
-	tbb::task* execute()
-	{
-		ocr_tbb::distributed::thread_context ctxv
+	ocr_tbb::distributed::thread_context ctxv
 #if (SIMULATE_MULTIPLE_NODES)
-			(0)
+		(0)
 #endif
-		;
-		ocr_tbb::distributed::thread_context *ctx = &ctxv;
-		ocr_tbb::distributed::runtime::set_barrier(new (allocate_continuation()) barrier_task());
+	;
+	ocr_tbb::distributed::thread_context *ctx = &ctxv;
+	auto* tg = new tbb::task_group();
+	ocr_tbb::distributed::runtime::set_task_group(tg);
 #if (SIMULATE_MULTIPLE_NODES)
-		ocr_tbb::distributed::runtime::get_barrier()->set_ref_count((int)ocr_tbb::distributed::communicator::number_of_nodes());
+	auto* b = new ocr_tbb::distributed::task_barrier(*tg, (int)ocr_tbb::distributed::communicator::number_of_nodes());
 #else
-		ocr_tbb::distributed::runtime::get_barrier()->set_ref_count(1);
+	auto* b = new ocr_tbb::distributed::task_barrier(*tg, 1);
 #endif
-
+	ocr_tbb::distributed::runtime::set_barrier(b);
 #if (!SIMULATE_MULTIPLE_NODES)
-		//in this mode, only one TBB task is created (this launcher), so there are no matching worker_start_task(s) to call the barrier
-		ocr_tbb::distributed::communicator::barrier(ctx, 0);
+	//in this mode, only one TBB task is created (this launcher), so there are no matching worker_start_body() calls to call the barrier
+	ocr_tbb::distributed::communicator::barrier(ctx, 0);
 #endif
-		ocrGuid_t main_template, main, args;
-		void* args_ptr;
-		ocrDbCreate(&args, &args_ptr, arg_data.size(), 0, 0, NO_ALLOC);
-		ocr_tbb::logging::log::event("db.name")(args)("args");
-		memcpy(args_ptr, &arg_data.front(), arg_data.size());
-		//ocrDbRelease(args); -- no owning task, can't release
-		ocrEdtTemplateCreate(&main_template, mainEdt, 0, 1);
+	ocrGuid_t main_template, main, args;
+	void* args_ptr;
+	ocrDbCreate(&args, &args_ptr, arg_data.size(), 0, 0, NO_ALLOC);
+	ocr_tbb::logging::log::event("db.name")(args)("args");
+	memcpy(args_ptr, &arg_data.front(), arg_data.size());
+	//ocrDbRelease(args); -- no owning task, can't release
+	ocrEdtTemplateCreate(&main_template, mainEdt, 0, 1);
 
-		ocr_tbb::distributed::ocrEdtCreate_affinity(&main, main_template, 0, 0, 1, 0, 0, ocr_tbb::distributed::guid(ocr_tbb::distributed::communicator::number_of_nodes() - 1, 1).as_ocr_guid(), 0);
-		ocrAddDependence(args, main, 0, DB_MODE_RW);
-		return 0;
-	}
-};
+	ocr_tbb::distributed::ocrEdtCreate_affinity(&main, main_template, 0, 0, 1, 0, 0, ocr_tbb::distributed::guid(ocr_tbb::distributed::communicator::number_of_nodes() - 1, 1).as_ocr_guid(), 0);
+	ocrAddDependence(args, main, 0, DB_MODE_RW);
+	tg->wait();
+	// Like the original spawn_root_and_wait root task, task_group/barrier are not destroyed
+	// here: a receiver thread draining late teardown messages may still reference them.
+}
 
 void do_delayed_log(double time)
 {
-	tbb::this_tbb_thread::sleep(tbb::tick_count::interval_t(time));
+	std::this_thread::sleep_for(std::chrono::duration<double>(time));
 #if (SIMULATE_MULTIPLE_NODES)
 	for (std::size_t i = 0; i < ocr_tbb::distributed::communicator::number_of_nodes(); ++i)
 	{
@@ -435,7 +427,7 @@ void do_delayed_pause(double time, double paused_time)
 #endif
 	;
 	ocr_tbb::distributed::thread_context *ctx = &ctxv;
-	tbb::this_tbb_thread::sleep(tbb::tick_count::interval_t(time));
+	std::this_thread::sleep_for(std::chrono::duration<double>(time));
 	if (!ocr_tbb::distributed::runtime::is_running(ctx)) return;
 	{
 		tbb::spin_mutex::scoped_lock lock(runtime_management_mutex);
@@ -444,7 +436,7 @@ void do_delayed_pause(double time, double paused_time)
 		ocr_tbb::distributed::runtime::global_load(ctx);
 		ocr_tbb::distributed::runtime::global_resume(ctx);
 	}
-	tbb::this_tbb_thread::sleep(tbb::tick_count::interval_t(paused_time));
+	std::this_thread::sleep_for(std::chrono::duration<double>(paused_time));
 	if (!ocr_tbb::distributed::runtime::is_running(ctx)) return;
 	{
 		tbb::spin_mutex::scoped_lock lock(runtime_management_mutex);
@@ -452,7 +444,7 @@ void do_delayed_pause(double time, double paused_time)
 		ocr_tbb::distributed::runtime::global_load(ctx);
 		ocr_tbb::distributed::runtime::global_resume(ctx);
 	}
-	tbb::this_tbb_thread::sleep(tbb::tick_count::interval_t(paused_time));
+	std::this_thread::sleep_for(std::chrono::duration<double>(paused_time));
 	if (!ocr_tbb::distributed::runtime::is_running(ctx)) return;
 	{
 		tbb::spin_mutex::scoped_lock lock(runtime_management_mutex);
@@ -473,7 +465,7 @@ void do_periodic_save(double time)
 	ocr_tbb::distributed::thread_context *ctx = &ctxv;
 	for (;;)
 	{
-		tbb::this_tbb_thread::sleep(tbb::tick_count::interval_t(time));
+		std::this_thread::sleep_for(std::chrono::duration<double>(time));
 		if (ocr_tbb::distributed::runtime::is_running(ctx))
 		{
 			tbb::spin_mutex::scoped_lock lock(runtime_management_mutex);
@@ -573,7 +565,8 @@ int main(int argc, char* argv[])
 	ocr_tbb::distributed::thread_context *ctx = &ctxv;
 	{
 		{
-			tbb::task_scheduler_init init;
+			tbb::global_control tbb_gc(tbb::global_control::max_allowed_parallelism,
+										tbb::info::default_concurrency());
 
 #if(TRACK_LIVE_MESSAGES)
 			ocr_tbb::distributed::command_processor::message::count_alive = 0;
@@ -624,17 +617,17 @@ int main(int argc, char* argv[])
 			{
 				if (opts.from_saved_state)
 				{
-					tbb::task::spawn_root_and_wait(*new(tbb::task::allocate_root())loader_task());
+					loader_body();
 				}
 				else
 				{
 					ocr_tbb::pack_arguments(argc, argv, arg_data);
-					tbb::task::spawn_root_and_wait(*new(tbb::task::allocate_root())launcher_task());
+					launcher_body();
 				}
 			}
 			else
 			{
-				tbb::task::spawn_root_and_wait(*new(tbb::task::allocate_root())worker_start_task());
+				worker_start_body();
 			}
 			ocr_tbb::distributed::communicator::stop_processing_messages();
 		}//communicator goes out of scope here

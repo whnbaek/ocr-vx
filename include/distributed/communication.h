@@ -9,6 +9,7 @@
 
 #include "threadqueue.h"
 #include <tbb/concurrent_queue.h>
+#include <atomic>
 
 #define PREALLOCATE_COUNT 128
 #define COFIRM_CT_NONE_MESSAGES 0
@@ -38,7 +39,7 @@ namespace ocr_tbb
 				return the(ctx).running_task_count_.load();
 			}
 		private:
-			tbb::atomic<std::size_t> running_task_count_;
+			std::atomic<std::size_t> running_task_count_;
 			static runtime_state_observer& the(thread_context* ctx);
 		};
 
@@ -129,7 +130,7 @@ namespace ocr_tbb
 					std::size_t size_;
 				};*/
 #if (TRACK_LIVE_MESSAGES)
-				static tbb::atomic<std::size_t> count_alive;
+				static std::atomic<std::size_t> count_alive;
 				static tbb::concurrent_unordered_map<void*, int> alive_map;
 				struct counter
 				{
@@ -1419,8 +1420,8 @@ namespace ocr_tbb
 						}
 					}
 					THREADQUEUE<command_processor::message_send_mode, message*> queue;
-					tbb::atomic<std::size_t> unconfirmed_message_count;
-					tbb::atomic<std::size_t> unsent_message_count;
+					std::atomic<std::size_t> unconfirmed_message_count;
+					std::atomic<std::size_t> unsent_message_count;
 					std::map<guid, edt_queue> edt_queues;
 				};
 

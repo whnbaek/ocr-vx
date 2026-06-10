@@ -653,7 +653,7 @@ namespace ocr_tbb
 					message msg(command_processor::command_code::CMD_subsystem, compute_node::get_my_id(), 0);
 					msg.main.a[0] = opencl_targets.size();
 					command_processor::process_message(msg);
-					while (!queue.try_pop(msg)) { tbb::this_tbb_thread::yield(); }
+					while (!queue.try_pop(msg)) { std::this_thread::yield(); }
 					msg.followup_to_vector(opencl_device_counts_on_nodes);
 					phase_ = PHASE_2;
 #if(SIMULATE_MULTIPLE_NODES)
@@ -673,7 +673,7 @@ namespace ocr_tbb
 					msg.main.from = compute_node::get_my_id();
 					msg.main.to = 0;
 					command_processor::process_message(msg);
-					while (!queue.try_pop(msg)) { tbb::this_tbb_thread::yield(); }
+					while (!queue.try_pop(msg)) { std::this_thread::yield(); }
 					msg.followup_to_vector(opencl_device_infos_for_nodes);
 				}
 			}
