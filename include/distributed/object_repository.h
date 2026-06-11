@@ -51,6 +51,36 @@ namespace ocr_tbb
 				if (archive) the(ctx).mapped_objects_graveyard_.push_back(std::make_pair(g, res));
 				return res;
 			}
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+			//Node-local client state for a collective event: the create-side params
+			//copy plus per-slot generation counters.  The k-th contribution on a
+			//slot is generation k; the k-th subscription on a slot pairs with
+			//generation k.  Counters are client-side so messages carry explicit
+			//generations and the owner never infers them from arrival order.
+			struct collective_client
+			{
+				u32 max_gen; u32 nb_contribs; u16 nb_datum; u16 op; u8 type;
+				std::vector<u64> iph; //per-slot contribution counter
+				std::vector<u64> oph; //per-slot subscription counter
+				tbb::spin_mutex mutex;
+			};
+			static collective_client* find_collective_client(thread_context* ctx, guid g)
+			{
+				collective_client_map_type::accessor ac;
+				if (!the(ctx).collective_clients_.find(ac, g)) return 0;
+				return ac->second;
+			}
+			//Install is idempotent: the app contract creates the event once per
+			//contributor call site, so a node may install the same record many
+			//times; the first wins and later calls return the existing record.
+			static collective_client* install_collective_client(thread_context* ctx, guid g, collective_client* rec)
+			{
+				collective_client_map_type::accessor ac;
+				if (the(ctx).collective_clients_.insert(ac, g)) { ac->second = rec; return rec; }
+				delete rec;
+				return ac->second;
+			}
+#endif
 			static guid preallocate_object(thread_context* ctx)
 			{
 				tbb::concurrent_vector<guided*>::iterator it = the(ctx).data_.push_back(0);
@@ -206,6 +236,10 @@ namespace ocr_tbb
 			mapped_object_storage_type mapped_objects_;
 			typedef tbb::concurrent_vector<std::pair<guid, guided*> > mapped_object_graveyard_type;
 			mapped_object_graveyard_type mapped_objects_graveyard_;
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+			typedef tbb::concurrent_hash_map<guid, collective_client*> collective_client_map_type;
+			collective_client_map_type collective_clients_;
+#endif
 			friend struct observer;
 		};
 	}

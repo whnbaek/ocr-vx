@@ -37,6 +37,7 @@ namespace ocr_tbb
 			G_db,
 			G_remote_object,
 			G_unknown,//only for remote objects
+			G_collective,//distributed collective (reduction) event
 		};
 
 		struct guided;
@@ -44,6 +45,7 @@ namespace ocr_tbb
 		struct edt_template;
 		struct node;
 		struct event;
+		struct collective;
 		struct edt;
 		struct command_processor;
 		struct communicator_base;
@@ -107,6 +109,11 @@ namespace ocr_tbb
 				CMD_barrier,//signal participation in barrier
 				CMD_barrier_done,//barrier was reached
 				CMD_subsystem,//subsystem's internal message
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+				CMD_mapped_collective_create,//create a mapped collective event on its owner if it does not exist yet
+				CMD_collective_contribute,//forward one contribution (explicit generation + datum bytes) to the collective's owner
+				CMD_collective_subscribe,//register a per-slot subscriber (explicit generation) with the collective's owner
+#endif
 #if(OCR_WITH_OPENCL)//keep OpenCL messages at the end, so that the codes for other messages do not change if OpenCL is disabled
 				CMD_opencl_edt_create,//create an OpenCL task on the target; the template should already exist, but the message may have been overtaken on the way
 #endif

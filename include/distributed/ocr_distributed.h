@@ -94,6 +94,9 @@ namespace ocr_tbb
 			edt_template* as_edt_template();
 			node* as_node();
 			event* as_event();
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+			collective* as_collective();
+#endif
 			edt* as_edt();
 			db* as_db();
 			const char* type_as_string() const
@@ -103,6 +106,9 @@ namespace ocr_tbb
 				case G_db: return "db";
 				case G_edt: return "edt";
 				case G_event: return "event";
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+				case G_collective: return "collective";
+#endif
 				case G_edt_template: return "template";
 				case G_remote_object: return "remote";
 				default:
@@ -1280,6 +1286,157 @@ namespace ocr_tbb
 			std::deque<postslot_t> channel_out_queue_;
 			friend struct observer;
 		};
+
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+		//Decode helpers for the reduction-operator descriptor bitfield declared in
+		//extensions/ocr-reduction-event.h: bit0 assoc, bit1 commut, bits2-4 datum
+		//size code, bit5 signed, bit6 real, bits7-9 operator.
+		inline u32 redop_datum_bytes(redOp_t op)
+		{
+			switch ((op >> 2) & 0x7) { case 0: return 1; case 1: return 2; case 3: return 4; case 7: return 8; default: assert(false); return 8; }
+		}
+		template<typename T> inline void redop_apply(T* a, const T* b, u32 oper, u32 n)
+		{
+			for (u32 i = 0; i < n; ++i)
+			{
+				switch (oper)
+				{
+				case 1: a[i] = a[i] * b[i]; break;            //MULT
+				case 2: a[i] = (b[i] < a[i]) ? b[i] : a[i]; break; //MIN
+				case 3: a[i] = (a[i] < b[i]) ? b[i] : a[i]; break; //MAX
+				default: a[i] = a[i] + b[i]; break;           //ADD
+				}
+			}
+		}
+		template<typename T> inline void redop_apply_int(T* a, const T* b, u32 oper, u32 n)
+		{
+			for (u32 i = 0; i < n; ++i)
+			{
+				switch (oper)
+				{
+				case 1: a[i] = a[i] * b[i]; break;
+				case 2: a[i] = (b[i] < a[i]) ? b[i] : a[i]; break;
+				case 3: a[i] = (a[i] < b[i]) ? b[i] : a[i]; break;
+				case 4: a[i] = a[i] & b[i]; break;            //BITAND
+				case 5: a[i] = a[i] | b[i]; break;            //BITOR
+				case 6: a[i] = a[i] ^ b[i]; break;            //BITXOR
+				default: a[i] = a[i] + b[i]; break;
+				}
+			}
+		}
+		//Element-wise in-place reduction of b into a over nbDatum elements.
+		inline void redop_reduce(void* a, const void* b, u32 nbDatum, redOp_t op)
+		{
+			u32 bytes = redop_datum_bytes(op);
+			u32 oper = (op >> 7) & 0x7;
+			bool isReal = ((op >> 6) & 0x1) != 0;
+			bool isSigned = ((op >> 5) & 0x1) != 0;
+			if (isReal)
+			{
+				if (bytes == 8) redop_apply((double*)a, (const double*)b, oper, nbDatum);
+				else { assert(bytes == 4); redop_apply((float*)a, (const float*)b, oper, nbDatum); }
+				return;
+			}
+			switch (bytes)
+			{
+			case 1: isSigned ? redop_apply_int((s8*)a, (const s8*)b, oper, nbDatum) : redop_apply_int((u8*)a, (const u8*)b, oper, nbDatum); break;
+			case 2: isSigned ? redop_apply_int((int16_t*)a, (const int16_t*)b, oper, nbDatum) : redop_apply_int((u16*)a, (const u16*)b, oper, nbDatum); break;
+			case 4: isSigned ? redop_apply_int((s32*)a, (const s32*)b, oper, nbDatum) : redop_apply_int((u32*)a, (const u32*)b, oper, nbDatum); break;
+			default: isSigned ? redop_apply_int((s64*)a, (const s64*)b, oper, nbDatum) : redop_apply_int((u64*)a, (const u64*)b, oper, nbDatum); break;
+			}
+		}
+
+		//A COLLECTIVE event: one authoritative instance lives on the mapped guid's
+		//owner node.  Contributions and subscriptions arrive as messages carrying
+		//explicit generation indices (the wire gives per-sender-stream ordering
+		//only, so arrival order must not be used to infer generations).  Results
+		//are pushed to each subscriber's node as raw bytes via
+		//CMD_satisfy_preslot_with_data, which materializes a node-local data block
+		//and satisfies the destination there.
+		struct collective : public guided
+		{
+			struct gen_slot
+			{
+				u64 gen;
+				u32 received;
+				bool done;
+				std::vector<char> accum;
+				struct sub_t { guid dest; u32 dslot; u8 mode; };
+				std::vector<sub_t> pending;
+			};
+
+			collective(u32 maxGen, u32 nbContribs, u16 nbDatum, redOp_t op, guid self)
+				: guided(G_collective, false), self_(self), max_gen_(maxGen), nb_contribs_(nbContribs),
+				  nb_datum_(nbDatum), op_(op), payload_((std::size_t)nbDatum * redop_datum_bytes(op)),
+				  window_(maxGen)
+			{
+				for (u32 w = 0; w < maxGen; ++w)
+				{
+					window_[w].gen = w;        //slot w starts representing generation w
+					window_[w].received = 0;
+					window_[w].done = false;
+					window_[w].accum.resize(payload_);
+				}
+			}
+
+			void contribute(thread_context* ctx, u32 islot, u64 gen, const void* bytes)
+			{
+				assert(islot < nb_contribs_);
+				tbb::spin_mutex::scoped_lock lock(mutex_);
+				gen_slot& s = window_at__locked(gen);
+				if (s.received == 0) ::memcpy(s.accum.data(), bytes, payload_);
+				else redop_reduce(s.accum.data(), bytes, nb_datum_, op_);
+				++s.received;
+				if (s.received == nb_contribs_)
+				{
+					s.done = true;
+					for (std::size_t i = 0; i < s.pending.size(); ++i)
+						deliver(ctx, s.pending[i], s.accum.data());
+					s.pending.clear();
+				}
+			}
+
+			void subscribe(thread_context* ctx, u32 sslot, u64 gen, guid dest, u32 dslot, u8 mode)
+			{
+				assert(sslot < nb_contribs_);
+				tbb::spin_mutex::scoped_lock lock(mutex_);
+				gen_slot& s = window_at__locked(gen);
+				gen_slot::sub_t sub; sub.dest = dest; sub.dslot = dslot; sub.mode = mode;
+				if (s.done) deliver(ctx, sub, s.accum.data());
+				else s.pending.push_back(sub);
+			}
+
+		private:
+			//Find (recycling if needed) the window slot for an absolute generation.
+			//At most max_gen_ generations may be in flight: recycling may only
+			//displace a generation that is complete and fully delivered, and a
+			//message for a generation older than the slot's current one means that
+			//generation was already recycled (duplicate or contract violation).
+			gen_slot& window_at__locked(u64 gen)
+			{
+				gen_slot& s = window_[(std::size_t)(gen % max_gen_)];
+				assert(gen >= s.gen);
+				if (gen > s.gen)
+				{
+					assert(s.done && s.pending.empty());
+					s.gen = gen;
+					s.received = 0;
+					s.done = false;
+				}
+				return s;
+			}
+			void deliver(thread_context* ctx, const gen_slot::sub_t& sub, const void* bytes);
+
+			guid self_;
+			u32 max_gen_;
+			u32 nb_contribs_;
+			u16 nb_datum_;
+			redOp_t op_;
+			std::size_t payload_;
+			std::vector<gen_slot> window_;
+			tbb::spin_mutex mutex_;
+		};
+#endif //ENABLE_EXTENSION_COLLECTIVE_EVT
 
 		struct edt : public node
 		{

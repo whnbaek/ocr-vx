@@ -48,6 +48,20 @@ typedef struct {
 } ocrEventChannelParams_t;
 #endif
 
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+#include "extensions/ocr-reduction-event.h"
+typedef struct {
+    u32 maxGen;        /**< Maximum number of generations simultaneously in flight */
+    u32 nbContribs;    /**< Overall number of contributions per generation */
+    u32 nbContribsPd;  /**< Contributions from the current policy domain */
+    u16 nbDatum;       /**< Number of datum elements per contribution */
+    u8  arity;         /**< Reduction tree arity (advisory) */
+    redOp_t op;        /**< Reduction operator descriptor */
+    collectiveType_t type;  /**< Collective type (only COL_ALLREDUCE supported) */
+    bool reuseDbPerGen;     /**< Allow result reuse every maxGen generations */
+} ocrEventCollectiveParams_t;
+#endif
+
 typedef struct {
     union {
         ocrEventLatchParams_t EVENT_LATCH;
@@ -56,6 +70,9 @@ typedef struct {
 #endif
 #ifdef ENABLE_EXTENSION_CHANNEL_EVT
         ocrEventChannelParams_t EVENT_CHANNEL;
+#endif
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+        ocrEventCollectiveParams_t EVENT_COLLECTIVE;
 #endif
     };
 } ocrEventParams_t;
@@ -347,6 +364,11 @@ u8 ocrAddDependence_site(ocrGuid_t source, ocrGuid_t destination, u32 slot,
 #else
 u8 ocrAddDependence(ocrGuid_t source, ocrGuid_t destination, u32 slot,
                     ocrDbAccessMode_t mode);
+#endif
+
+#ifdef ENABLE_EXTENSION_MULTI_OUTPUT_SLOT
+u8 ocrAddDependenceSlot(ocrGuid_t source, u32 sslot, ocrGuid_t destination, u32 dslot,
+                        ocrDbAccessMode_t mode);
 #endif
 
 

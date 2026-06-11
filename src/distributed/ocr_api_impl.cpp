@@ -103,13 +103,53 @@ u8 ocrEventCreate(ocrGuid_t *guid, ocrEventTypes_t eventType, u16 properties)
 u8 ocrEventCreateParams(ocrGuid_t *guid, ocrEventTypes_t eventType, u16 properties, ocrEventParams_t * params)
 {
 	ocr_tbb::distributed::thread_context* ctx = ocr_tbb::distributed::thread_context::get_local();
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+	assert(eventType == OCR_EVENT_LATCH_T || eventType == OCR_EVENT_CHANNEL_T || eventType == OCR_EVENT_COLLECTIVE_T);
+#else
 	assert(eventType == OCR_EVENT_LATCH_T || eventType == OCR_EVENT_CHANNEL_T);//only latches and channels supported at the moment
+#endif
 	assert(params);
 	bool is_mapped = (properties & GUID_PROP_IS_LABELED) == GUID_PROP_IS_LABELED;
 	bool check = (properties & GUID_PROP_CHECK) == GUID_PROP_CHECK;
 	bool takesArg = (EVT_PROP_TAKES_ARG & EVT_PROP_TAKES_ARG) == EVT_PROP_TAKES_ARG;
 	u64 latch_initial_value = 0;
 	if (eventType == OCR_EVENT_LATCH_T) latch_initial_value = params->EVENT_LATCH.counter;
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+	if (eventType == OCR_EVENT_COLLECTIVE_T)
+	{
+		//A collective event must use a labeled guid known to every participant,
+		//and every participant creates it with identical parameters.
+		assert(is_mapped && !ocrGuidIsNull(*guid));
+		assert(params->EVENT_COLLECTIVE.type == COL_ALLREDUCE);
+		assert(params->EVENT_COLLECTIVE.maxGen > 0 && params->EVENT_COLLECTIVE.nbContribs > 0 && params->EVENT_COLLECTIVE.nbDatum > 0);
+		ocr_tbb::distributed::guid g = ocr_tbb::distributed::guid(*guid);
+		ocr_tbb::distributed::object_repository::collective_client* rec =
+			ocr_tbb::distributed::object_repository::find_collective_client(ctx, g);
+		if (!rec)
+		{
+			rec = new ocr_tbb::distributed::object_repository::collective_client();
+			rec->max_gen = params->EVENT_COLLECTIVE.maxGen;
+			rec->nb_contribs = params->EVENT_COLLECTIVE.nbContribs;
+			rec->nb_datum = params->EVENT_COLLECTIVE.nbDatum;
+			rec->op = (u16)params->EVENT_COLLECTIVE.op;
+			rec->type = (u8)params->EVENT_COLLECTIVE.type;
+			rec->iph.assign(rec->nb_contribs, 0);
+			rec->oph.assign(rec->nb_contribs, 0);
+			rec = ocr_tbb::distributed::object_repository::install_collective_client(ctx, g, rec);
+			//Once-per-node create message; the owner-side flow is idempotent anyway.
+			ocr_tbb::distributed::communicator::send::CMD_mapped_collective_create(ctx, g,
+				rec->max_gen, rec->nb_contribs, rec->nb_datum, rec->op, rec->type);
+		}
+		else
+		{
+			assert(rec->max_gen == params->EVENT_COLLECTIVE.maxGen
+				&& rec->nb_contribs == params->EVENT_COLLECTIVE.nbContribs
+				&& rec->nb_datum == params->EVENT_COLLECTIVE.nbDatum
+				&& rec->op == (u16)params->EVENT_COLLECTIVE.op);
+		}
+		return 0;
+	}
+#endif
 	if (is_mapped)
 	{
 		assert(!ocrGuidIsNull(*guid));
@@ -126,6 +166,45 @@ u8 ocrEventCreateParams(ocrGuid_t *guid, ocrEventTypes_t eventType, u16 properti
 	}
 	return 0;
 }
+
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+u8 ocrEventCollectiveSatisfySlot(ocrGuid_t eventGuid, void* dataPtr, u32 islot)
+{
+	ocr_tbb::distributed::thread_context* ctx = ocr_tbb::distributed::thread_context::get_local();
+	ocr_tbb::distributed::guid g(eventGuid);
+	ocr_tbb::distributed::object_repository::collective_client* rec =
+		ocr_tbb::distributed::object_repository::find_collective_client(ctx, g);
+	assert(rec && islot < rec->nb_contribs);//create-before-use on every participating node
+	u64 gen;
+	{
+		tbb::spin_mutex::scoped_lock lock(rec->mutex);
+		gen = rec->iph[islot]++;
+	}
+	std::size_t len = (std::size_t)rec->nb_datum * ocr_tbb::distributed::redop_datum_bytes((redOp_t)rec->op);
+	ocr_tbb::distributed::communicator::send::CMD_collective_contribute(ctx, g, islot, gen, dataPtr, len);
+	return 0;
+}
+#endif
+
+#ifdef ENABLE_EXTENSION_MULTI_OUTPUT_SLOT
+u8 ocrAddDependenceSlot(ocrGuid_t source, u32 sslot, ocrGuid_t destination, u32 dslot, ocrDbAccessMode_t mode)
+{
+	ocr_tbb::distributed::thread_context* ctx = ocr_tbb::distributed::thread_context::get_local();
+	ocr_tbb::distributed::guid g(source);
+	ocr_tbb::distributed::object_repository::collective_client* rec =
+		ocr_tbb::distributed::object_repository::find_collective_client(ctx, g);
+	//Source-side output slots are only defined for collective events.
+	assert(rec && sslot < rec->nb_contribs);
+	u64 gen;
+	{
+		tbb::spin_mutex::scoped_lock lock(rec->mutex);
+		gen = rec->oph[sslot]++;
+	}
+	ocr_tbb::distributed::communicator::send::CMD_collective_subscribe(ctx, g, sslot, gen,
+		ocr_tbb::distributed::guid(destination), dslot, (u8)mode);
+	return 0;
+}
+#endif
 
 u8 ocrEventDestroy(ocrGuid_t guid)
 {

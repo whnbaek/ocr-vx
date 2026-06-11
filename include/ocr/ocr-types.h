@@ -310,6 +310,11 @@ typedef enum {
     OCR_EVENT_CHANNEL_T = 6, /**< TODO
                           */
 #endif
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+    OCR_EVENT_COLLECTIVE_T = 7, /**< A COLLECTIVE event performs a reduction over
+                          * nbContribs contributor slots per generation and
+                          * delivers the result to per-slot subscribers. */
+#endif
     OCR_EVENT_T_MAX      /**< This is *NOT* an event and is only used to count
                           * the number of event types. Its use is reserved for the
                           * runtime. */

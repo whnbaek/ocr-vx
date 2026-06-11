@@ -60,6 +60,32 @@ namespace ocr_tbb
 			return static_cast<event*>(this);
 		}
 
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+		collective* guided::as_collective()
+		{
+			if (this == 0) return 0;
+			assert(type() == G_collective);
+			assert(!is_proxy_);
+			return static_cast<collective*>(this);
+		}
+
+		//Push the result bytes to the subscriber's node.  Reuses the data-carrying
+		//satisfy command, whose handler materializes a node-local data block and
+		//satisfies the destination preslot there (including the usual deferral
+		//when the destination object has not been created yet).
+		void collective::deliver(thread_context* ctx, const gen_slot::sub_t& sub, const void* bytes)
+		{
+			command_processor::message* msg = new command_processor::message(ctx, command_code::CMD_satisfy_preslot_with_data, compute_node::get_my_id(ctx), sub.dest.get_node_id());
+			msg->main.a[0] = guid(sub.dest).as_message_field();
+			msg->main.a[1] = (u64)sub.dslot;
+			msg->main.a[2] = (u64)payload_;
+			msg->main.a[3] = (u64)sub.mode;
+			msg->followup_resize_and_clear(payload_);
+			::memcpy(msg->followup_ptr(), bytes, payload_);
+			command_processor::process_message(ctx, command_processor::MSM_standard, msg);
+		}
+#endif
+
 		db* guided::as_db()
 		{
 			if (this == 0) return 0;
@@ -103,6 +129,13 @@ namespace ocr_tbb
 				if (it->second) delete it->second;
 			}
 			mapped_objects_graveyard_.clear();
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+			for (collective_client_map_type::iterator it = collective_clients_.begin(); it != collective_clients_.end(); ++it)
+			{
+				if (it->second) delete it->second;
+			}
+			collective_clients_.clear();
+#endif
 		}
 
 		bool object_repository::add_mapped_object(thread_context* ctx, guid g, guided* ptr)

@@ -459,6 +459,33 @@ namespace ocr_tbb
 					static bool allow_concurrent_creates(const message& m) { return !!m.main.a[3]; }
 					static u64 latch_initial_value(const message& m) { return m.main.a[4]; }
 				};
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+				struct CMD_mapped_collective_create
+				{
+					static guid event_guid(const message& m) { return guid(m.main.a[0]).as_ocr_guid(); }
+					static u32 max_gen(const message& m) { return (u32)m.main.a[1]; }
+					static u32 nb_contribs(const message& m) { return (u32)m.main.a[2]; }
+					static u16 nb_datum(const message& m) { return (u16)m.main.a[3]; }
+					static u16 op(const message& m) { return (u16)m.main.a[4]; }
+					static u8 collective_type(const message& m) { return (u8)m.main.a[5]; }
+				};
+				struct CMD_collective_contribute
+				{
+					static guid event_guid(const message& m) { return guid(m.main.a[0]).as_ocr_guid(); }
+					static u32 islot(const message& m) { return (u32)m.main.a[1]; }
+					static u64 gen(const message& m) { return m.main.a[2]; }
+					static std::size_t data_size(const message& m) { return (std::size_t)m.main.a[3]; }
+				};
+				struct CMD_collective_subscribe
+				{
+					static guid event_guid(const message& m) { return guid(m.main.a[0]).as_ocr_guid(); }
+					static u32 sslot(const message& m) { return (u32)m.main.a[1]; }
+					static u64 gen(const message& m) { return m.main.a[2]; }
+					static guid destination(const message& m) { return guid(m.main.a[3]).as_ocr_guid(); }
+					static u32 dslot(const message& m) { return (u32)m.main.a[4]; }
+					static u8 mode(const message& m) { return (u8)m.main.a[5]; }
+				};
+#endif
 				struct CMD_db_elevation_request
 				{
 					static guid data_block(const message& m) { return guid(m.main.a[0]).as_ocr_guid(); }
@@ -757,6 +784,20 @@ namespace ocr_tbb
 					CMD_subsystem() : descriptor(command_code::CMD_subsystem, "CMD_subsystem", CT_special) {}
 					/*override*/ std::size_t followup_size(const message& m);
 				};
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+				DESCRIPTOR(CMD_mapped_collective_create, CT_single);
+				//Completing a generation fans results out to SEVERAL subscribers, so
+				//these are CT_task: each nested send gets its own stream identity and
+				//the original message's confirmation is queued behind them.  CT_forward
+				//would stamp every fanned-out message with the same stream id, double-
+				//confirming it and underflowing the sender's unconfirmed counter.
+				struct CMD_collective_contribute : public descriptor
+				{
+					CMD_collective_contribute() : descriptor(command_code::CMD_collective_contribute, "CMD_collective_contribute", CT_task) {}
+					/*override*/ std::size_t followup_size(const message& m) { return get::CMD_collective_contribute::data_size(m); }
+				};
+				DESCRIPTOR(CMD_collective_subscribe, CT_task);
+#endif
 			};
 			static descriptor& describe(command c)
 			{
@@ -815,6 +856,11 @@ namespace ocr_tbb
 				the_descriptors.push_back(new descriptors::CMD_barrier());
 				the_descriptors.push_back(new descriptors::CMD_barrier_done());
 				the_descriptors.push_back(new descriptors::CMD_subsystem());
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+				the_descriptors.push_back(new descriptors::CMD_mapped_collective_create());
+				the_descriptors.push_back(new descriptors::CMD_collective_contribute());
+				the_descriptors.push_back(new descriptors::CMD_collective_subscribe());
+#endif
 #if(OCR_WITH_OPENCL)
 				the_descriptors.push_back(new descriptors::CMD_opencl_edt_create());
 #endif
@@ -1161,6 +1207,47 @@ namespace ocr_tbb
 					}
 					command_processor::process_message(ctx, command_processor::MSM_standard, msg);
 				}
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+				static void CMD_mapped_collective_create(thread_context* ctx, guid event_guid, u32 max_gen, u32 nb_contribs, u16 nb_datum, u16 op, u8 collective_type)
+				{
+					assert(event_guid.is_mapped());
+					node_id to = event_guid.get_mapped_node_id();
+					message* msg = new message(ctx, command_code::CMD_mapped_collective_create, compute_node::get_my_id(ctx), to);
+					msg->main.a[0] = event_guid.as_message_field();
+					msg->main.a[1] = (u64)max_gen;
+					msg->main.a[2] = (u64)nb_contribs;
+					msg->main.a[3] = (u64)nb_datum;
+					msg->main.a[4] = (u64)op;
+					msg->main.a[5] = (u64)collective_type;
+					command_processor::process_message(ctx, command_processor::MSM_standard, msg);
+				}
+				static void CMD_collective_contribute(thread_context* ctx, guid event_guid, u32 islot, u64 gen, const void* bytes, std::size_t len)
+				{
+					assert(event_guid.is_mapped());
+					node_id to = event_guid.get_mapped_node_id();
+					message* msg = new message(ctx, command_code::CMD_collective_contribute, compute_node::get_my_id(ctx), to);
+					msg->main.a[0] = event_guid.as_message_field();
+					msg->main.a[1] = (u64)islot;
+					msg->main.a[2] = gen;
+					msg->main.a[3] = (u64)len;
+					msg->followup_resize_and_clear(len);
+					::memcpy(msg->followup_ptr(), bytes, len);
+					command_processor::process_message(ctx, command_processor::MSM_standard, msg);
+				}
+				static void CMD_collective_subscribe(thread_context* ctx, guid event_guid, u32 sslot, u64 gen, guid destination, u32 dslot, u8 mode)
+				{
+					assert(event_guid.is_mapped());
+					node_id to = event_guid.get_mapped_node_id();
+					message* msg = new message(ctx, command_code::CMD_collective_subscribe, compute_node::get_my_id(ctx), to);
+					msg->main.a[0] = event_guid.as_message_field();
+					msg->main.a[1] = (u64)sslot;
+					msg->main.a[2] = gen;
+					msg->main.a[3] = guid(destination).as_message_field();
+					msg->main.a[4] = (u64)dslot;
+					msg->main.a[5] = (u64)mode;
+					command_processor::process_message(ctx, command_processor::MSM_standard, msg);
+				}
+#endif
 				static void CMD_mapped_event_create(thread_context* ctx, guid event_guid, ocrEventTypes_t eventType, u16 properties, bool allow_concurrent_creates, u64 latch_initial_value)
 				{
 					assert(event_guid.is_mapped());

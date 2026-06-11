@@ -264,6 +264,14 @@ namespace ocr_tbb
 					required = get::CMD_satisfy_preslot::destination(m); break;
 				case command_code::CMD_satisfy_preslot_with_data:
 					required = get::CMD_satisfy_preslot_with_data::destination(m); break;
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+				//A contribution or subscription may overtake the collective's
+				//create across sender-EDT streams; park it until the create lands.
+				case command_code::CMD_collective_contribute:
+					required = get::CMD_collective_contribute::event_guid(m); break;
+				case command_code::CMD_collective_subscribe:
+					required = get::CMD_collective_subscribe::event_guid(m); break;
+#endif
 				case command_code::CMD_edt_start_trivial:
 					required = get::CMD_edt_start_trivial::edt_guid(m); break;
 				default: break;
@@ -528,6 +536,41 @@ namespace ocr_tbb
 				assert(allow_concurrent_creates || was_added);
 				break;
 			}
+#ifdef ENABLE_EXTENSION_COLLECTIVE_EVT
+			case command_code::CMD_mapped_collective_create:
+			{
+				guid g = get::CMD_mapped_collective_create::event_guid(m);
+				assert(g.is_mapped());
+				assert(g.get_mapped_node_id() == compute_node::get_my_id(ctx));
+				//Creates arrive once per participating creator call site; the first
+				//installs the object, the rest are idempotent (add_mapped_object
+				//frees the duplicate instance itself).
+				if (!guided::from_guid(ctx, g))
+				{
+					collective* c = new collective(
+						get::CMD_mapped_collective_create::max_gen(m),
+						get::CMD_mapped_collective_create::nb_contribs(m),
+						get::CMD_mapped_collective_create::nb_datum(m),
+						(redOp_t)get::CMD_mapped_collective_create::op(m), g);
+					object_repository::add_mapped_object(ctx, g, c);
+				}
+				break;
+			}
+			case command_code::CMD_collective_contribute:
+			{
+				collective* c = guided::from_guid(ctx, get::CMD_collective_contribute::event_guid(m))->as_collective();
+				assert(get::CMD_collective_contribute::data_size(m) == m.followup_size());
+				c->contribute(ctx, get::CMD_collective_contribute::islot(m), get::CMD_collective_contribute::gen(m), m.followup_ptr());
+				break;
+			}
+			case command_code::CMD_collective_subscribe:
+			{
+				collective* c = guided::from_guid(ctx, get::CMD_collective_subscribe::event_guid(m))->as_collective();
+				c->subscribe(ctx, get::CMD_collective_subscribe::sslot(m), get::CMD_collective_subscribe::gen(m),
+					get::CMD_collective_subscribe::destination(m), get::CMD_collective_subscribe::dslot(m), get::CMD_collective_subscribe::mode(m));
+				break;
+			}
+#endif
 			case command_code::CMD_db_elevation_request:
 			{
 				guided::from_guid(ctx, get::CMD_db_elevation_request::data_block(m))->as_db()->synchro().owner__request_elevation(ctx, get::CMD_db_elevation_request::node(m), get::CMD_db_elevation_request::required_level(m));
