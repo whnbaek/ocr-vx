@@ -933,9 +933,15 @@ namespace ocr_tbb
 
 			struct send
 			{
+				//Exit must be the last command a node delivers on a link: route
+				//it through the sender queue so it cannot overtake commands the
+				//sender has not pushed to the wire yet (e.g. a barrier-done a
+				//peer is still waiting for; the peer's receiver terminates on
+				//exit and anything overtaken would be lost).
 				static void CMD_exit(thread_context* ctx, node_id to)
 				{
-					send_message(ctx, new message(ctx, command_code::CMD_exit, compute_node::get_my_id(ctx), to));
+					message* msg = new message(ctx, command_code::CMD_exit, compute_node::get_my_id(ctx), to);
+					command_processor::process_message(ctx, command_processor::MSM_direct_send, msg);
 				}
 				static void CMD_confirmation(thread_context* ctx, command_processor::message_send_mode mode, const message::main_data_type& m) // send a confirmation that the message m was sucessfully processed
 				{
@@ -1522,7 +1528,7 @@ namespace ocr_tbb
 							send_message(ctx, m.release());
 							continue;
 						}
-						if (m->main.cmd == command_code::CMD_barrier || m->main.cmd == command_code::CMD_barrier_done)
+						if (m->main.cmd == command_code::CMD_barrier || m->main.cmd == command_code::CMD_barrier_done || m->main.cmd == command_code::CMD_exit)
 						{
 							assert(mode == command_processor::MSM_direct_send);
 							send_message(ctx, m.release());
@@ -1676,6 +1682,21 @@ namespace ocr_tbb
 #endif
 					my_data->read(r);
 				}
+				//True when no stream message is held back waiting for a
+				//confirmation (unsent == 0) and every confirmation-carrying
+				//message sent from this node has been confirmed
+				//(unconfirmed == 0).
+				bool quiet(thread_context* ctx) const
+				{
+					const runner::data_t* my_data;
+#if (SIMULATE_MULTIPLE_NODES)
+					my_data = &*queues_[(std::size_t)compute_node::get_my_id(ctx)];
+#else
+					(void)ctx;
+					my_data = &queue_;
+#endif
+					return my_data->unsent_message_count.load() == 0 && my_data->unconfirmed_message_count.load() == 0;
+				}
 			private:
 #if (SIMULATE_MULTIPLE_NODES)
 				u64 nodes_;
@@ -1699,6 +1720,14 @@ namespace ocr_tbb
 			{
 				the()->processor.stop();
 
+			}
+			//True when this node's message layer is locally quiet: every
+			//confirmation-carrying message we sent has been confirmed
+			//(unconfirmed == 0) and no stream message is held back waiting
+			//for a confirmation of its predecessor (unsent == 0).
+			static bool message_layer_quiet(thread_context* ctx)
+			{
+				return the()->processor.quiet(ctx);
 			}
 		private:
 			/*static void delegate_send_message(const message& m)

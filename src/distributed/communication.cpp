@@ -451,13 +451,47 @@ namespace ocr_tbb
 		mpi_communicator::~mpi_communicator()
 		{
 			thread_context* ctx = thread_context::get_local();
-			//Quiesce the task pool before starting the teardown: receiver
-			//threads hand incoming work (task starts, completion cascades,
-			//data-block destroy fan-outs) to pool threads asynchronously, so
-			//returning from the shutdown wait does not mean those tasks have
-			//finished.  Wait while the communication channels are still alive,
-			//so a task that needs a reply (e.g. a blocking fetch) can complete.
-			if (tbb::task_group* tg = ocr_tbb::distributed::runtime::get_task_group()) tg->wait();
+			//Drain the message layer to a global quiet point before sending
+			//the exit commands.  The sender keeps every stream's messages in
+			//order by holding a message back until its predecessor has been
+			//confirmed by the receiving node, and confirmations themselves
+			//travel through the sender.  A node may therefore only stop its
+			//sender (and only promise, by sending CMD_exit, that nothing more
+			//will follow) once every node's streams have fully drained —
+			//otherwise a confirmation a peer still needs could be stranded in
+			//a stopped sender's queue and the peer would wait for it forever.
+			//
+			//Each round first reaches a LOCAL fixpoint: wait for the task
+			//pool (receiver threads hand incoming work to pool threads
+			//asynchronously, and that work may send more messages), then
+			//re-check the counters, repeating until both hold at once.  A
+			//single barrier over local fixpoints is not enough: a message
+			//arriving between the local check and the barrier is processed
+			//while its receiver is already waiting in the barrier, and the
+			//follow-up messages that processing sends would go unaccounted.
+			//Such a message's SENDER, however, is still unconfirmed and thus
+			//still in its own fixpoint loop, so the first barrier guarantees
+			//every message sent before it has been fully processed.  The
+			//second round then drains the bounded chain of follow-ups that
+			//slipped into that window; after it no node can produce another
+			//message.  The final fixpoint absorbs this node's own tail of
+			//that chain before exit is enqueued behind it.
+			for (int round = 0; round < 2; ++round)
+			{
+				for (;;)
+				{
+					if (tbb::task_group* tg = ocr_tbb::distributed::runtime::get_task_group()) tg->wait();
+					if (message_layer_quiet(ctx)) break;
+					std::this_thread::yield();
+				}
+				barrier(ctx, 0);
+			}
+			for (;;)
+			{
+				if (tbb::task_group* tg = ocr_tbb::distributed::runtime::get_task_group()) tg->wait();
+				if (message_layer_quiet(ctx)) break;
+				std::this_thread::yield();
+			}
 			for (std::size_t i = 0; i < threads_.size(); ++i)
 			{
 				message m(ctx, command_code::CMD_exit, compute_node::get_my_id(ctx), (node_id)i);
@@ -467,7 +501,12 @@ namespace ocr_tbb
 				}
 				else
 				{
-					internal_send_message(ctx, m);
+					//Through the sender queue, not the wire directly: exit must
+					//not overtake commands the sender has not pushed out yet
+					//(e.g. the barrier-done of the rendezvous above) — the
+					//peer's receiver terminates on exit and anything overtaken
+					//would be lost.
+					send::CMD_exit(ctx, (node_id)i);
 				}
 				internal_send_fetch_message(ctx, m);
 			}
@@ -476,6 +515,12 @@ namespace ocr_tbb
 				threads_[i]->join();
 				threads_fetch_[i]->join();
 			}
+			//Stop the sender only now: after the global quiet point nothing
+			//enqueues messages anymore, so its queue is empty and the stop
+			//sentinel terminates it immediately.  Stopping it any earlier
+			//(as the generic pre-teardown stop used to) could strand queued
+			//confirmations and deadlock a peer's sender on its unsent count.
+			stop_processing_messages();
 			//The messages drained ahead of CMD_exit may have spawned more pool
 			//tasks; wait for them before unsetting the communicator, or their
 			//outgoing sends would dereference it after it is gone.

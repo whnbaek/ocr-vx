@@ -641,7 +641,13 @@ int main(int argc, char* argv[])
 			{
 				worker_start_body();
 			}
+#if !(OCR_USE_MPI)
+			//The MPI communicator's destructor stops the sender itself, after
+			//draining the message layer to a global quiet point — stopping it
+			//here could strand queued confirmations that a peer's sender still
+			//waits for (its streams hold messages back until confirmed).
 			ocr_tbb::distributed::communicator::stop_processing_messages();
+#endif
 		}//communicator goes out of scope here
 		ocr_tbb::logging::log::stop();
 #if (TRACK_LIVE_MESSAGES)
