@@ -565,8 +565,20 @@ int main(int argc, char* argv[])
 	ocr_tbb::distributed::thread_context *ctx = &ctxv;
 	{
 		{
+			//OCRVX_NUM_THREADS caps the TBB compute parallelism (including the
+			//main thread, which executes tasks while waiting).  This lets a
+			//launcher partition a machine between processes instead of every
+			//process assuming it owns all cores.  Communication threads (the
+			//sender and the per-peer receivers) are not affected: they block
+			//in receives and do not consume cores while idle.
+			int tbb_parallelism = tbb::info::default_concurrency();
+			if (const char* tbb_env = getenv("OCRVX_NUM_THREADS"))
+			{
+				int v = atoi(tbb_env);
+				if (v > 0) tbb_parallelism = v;
+			}
 			tbb::global_control tbb_gc(tbb::global_control::max_allowed_parallelism,
-										tbb::info::default_concurrency());
+										tbb_parallelism);
 
 #if(TRACK_LIVE_MESSAGES)
 			ocr_tbb::distributed::command_processor::message::count_alive = 0;

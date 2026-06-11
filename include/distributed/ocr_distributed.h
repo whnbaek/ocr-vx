@@ -80,7 +80,8 @@ namespace ocr_tbb
 			{
 				if (g.is_local(ctx))
 				{
-					if (g.is_mapped()) return object_repository::get_mapped_object(ctx, g);
+					//returns 0 if the object is preallocated or not yet created
+					if (g.is_mapped()) return object_repository::try_get_mapped_object(ctx, g);
 					else return object_repository::get_object(ctx, g);
 				}
 				else

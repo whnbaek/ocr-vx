@@ -28,6 +28,17 @@ namespace ocr_tbb
 				assert(found);
 				return ac->second;
 			}
+			static guided* try_get_mapped_object(thread_context* ctx, guid g)
+			{
+				//Existence probe: a mapped (labeled) GUID can be referenced by a
+				//peer before its create message has been processed here, so a
+				//miss is a legitimate transient state, not an error.
+				assert(g.is_mapped());
+				assert(g.get_mapped_node_id() == compute_node::get_my_id(ctx));
+				accessor ac;
+				if (!the(ctx).mapped_objects_.find(ac, g)) return 0;
+				return ac->second;
+			}
 			static guided* remove_mapped_object(thread_context* ctx, guid g, bool archive)
 			{
 				assert(g.is_mapped());
@@ -61,9 +72,10 @@ namespace ocr_tbb
 				assert(g.get_node_id() == compute_node::get_my_id(ctx));
 				if (g.is_mapped())
 				{
+					//a miss is a legitimate transient state (create not yet
+					//processed); callers treat 0 as "not created yet"
 					mapped_object_storage_type::accessor ac;
-					bool found = the(ctx).mapped_objects_.find(ac, g);
-					assert(found);
+					if (!the(ctx).mapped_objects_.find(ac, g)) return 0;
 					return ac->second;
 				}
 				else

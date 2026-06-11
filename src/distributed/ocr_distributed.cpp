@@ -159,7 +159,7 @@ namespace ocr_tbb
 				ocrAddDependence(event_guid, parent_finish, OCR_EVENT_LATCH_DECR_SLOT, DB_DEFAULT_MODE);
 				finish_for_children_ = parent_finish;//inherit parent, if this EDT is finish, it will substitute it's own event in the next condition
 			}
-			if (properties == EDT_PROP_FINISH)
+			if ((properties & EDT_PROP_FINISH) == EDT_PROP_FINISH)//property bits combine (e.g. with EDT_PROP_OEVT_VALID), so test the bit, not the whole word
 			{
 				DEBUG_COUT("finish for children of " << self_ << " is " << event_guid);
 				ocrEventSatisfySlot(event_guid, NULL_GUID, OCR_EVENT_LATCH_INCR_SLOT);

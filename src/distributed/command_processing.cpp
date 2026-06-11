@@ -43,13 +43,39 @@ namespace ocr_tbb
 				guid g(get::CMD_pull_object::pushed_guid(m));
 				assert(g.is_local(ctx));
 				guided* obj = guided::from_guid(ctx, g);
+				while (!obj)
+				{
+					//The pull may overtake the create message for this object: a
+					//peer can compute a labeled GUID (or receive a preallocated
+					//one through task arguments) without any message from the
+					//creator, so no ordering exists between the two.  Creates
+					//arrive on other receiver threads, so waiting here is safe:
+					//this thread serves the fetch requests of a single peer, and
+					//that peer is blocked waiting for this very reply.
+					std::this_thread::yield();
+					obj = guided::from_guid(ctx, g);
+				}
 				switch (obj->type())
 				{
 				case G_edt_template:
 				{
 					DEBUG_COUT(compute_node::get_my_id(ctx) << ": commanded by " << m.main.from << " to send back EDT template " << g);
-					communicator::send::CMD_push_edt_template(ctx, m.main.from, g, obj->as_edt_template()->func_, obj->as_edt_template()->paramc_, obj->as_edt_template()->depc_, obj->as_edt_template()->name_);
-					assert(0);//response should be sent via the fetch channel
+					//the requester is blocked in a fetch-channel receive, so the
+					//reply must go back through the fetch channel (a standard-
+					//channel reply would leave the requester waiting forever)
+					message *re = new message(ctx, command_code::CMD_push_edt_template, m.main.to, m.main.from);
+					re->main.a[0] = g.as_message_field();
+#ifdef ENABLE_EXTENSION_HETEROGENEOUS_FUNCTIONS
+					re->main.a[1] = runtime::edt_function_ptr_to_index(ctx, obj->as_edt_template()->func_);
+#else
+					re->main.a[1] = (u64)(intptr_t)obj->as_edt_template()->func_;
+#endif
+					re->main.a[2] = obj->as_edt_template()->paramc_;
+					re->main.a[3] = obj->as_edt_template()->depc_;
+					re->main.a[4] = (u64)obj->as_edt_template()->name_.size();
+					re->main.a[5] = 0;//this marks it as non-OpenCL
+					re->assign(obj->as_edt_template()->name_.begin(), obj->as_edt_template()->name_.end());
+					communicator::send_fetch_back(ctx, re);
 					break;
 				}
 				case G_db:
@@ -61,8 +87,11 @@ namespace ocr_tbb
 				default:
 				{
 					DEBUG_COUT(compute_node::get_my_id(ctx) << ": commanded by " << m.main.from << " to send back " << g << ", which is a " << obj->type_as_string() << ", sending a proxy");
-					communicator::send::CMD_push_proxy(ctx, m.main.from, g, obj->type());
-					assert(0);//response should be sent via the fetch channel
+					//fetch-channel proxy reply; the requester decodes a[0] as the
+					//object type (see communicator_base::fetch)
+					message *re = new message(ctx, command_code::CMD_push_proxy, m.main.to, m.main.from);
+					re->main.a[0] = (u64)obj->type();
+					communicator::send_fetch_back(ctx, re);
 					break;
 				}
 				}
@@ -184,10 +213,16 @@ namespace ocr_tbb
 			tbb::spin_mutex::scoped_lock lock(the(ctx).mutex_);
 			if (needed.size() > 0 || to_fetch.size() > 0)
 			{
+				//Prefetch is only meaningful for remote objects (it populates the
+				//object cache).  A local GUID whose object is absent cannot be
+				//resolved by pulling from its home node -- we ARE the home node;
+				//such a pull would loop back to this node and dereference a
+				//missing object.  Local absence is handled below by deferring
+				//the message until the object is created.
 				for (std::size_t i = 0; i < to_fetch.size(); ++i)
 				{
 					guid g = to_fetch[i];
-					if (g != NULL_GUID)
+					if (g != NULL_GUID && !g.is_local(ctx))
 					{
 						guided* obj = object_cache::try_get_object_locally(ctx, g);
 						if (!obj)
@@ -199,7 +234,7 @@ namespace ocr_tbb
 				for (std::size_t i = 0; i < needed.size(); ++i)
 				{
 					guid g = needed[i];
-					if (g != NULL_GUID)
+					if (g != NULL_GUID && !g.is_local(ctx))
 					{
 						guided* obj = object_cache::try_get_object_locally(ctx, g);
 						if (!obj)
@@ -207,6 +242,37 @@ namespace ocr_tbb
 							object_cache::add_object(ctx, g, communicator::fetch(ctx, g));
 						}
 					}
+				}
+			}
+			//Defer messages that operate on a local object that does not exist
+			//yet.  This happens legitimately for labeled (mapped) GUIDs: a peer
+			//can compute such a GUID without any message from the creator, so
+			//its add/satisfy message may overtake the create message.  The same
+			//applies to preallocated plain GUIDs passed to a third node.  The
+			//message is pushed back onto the local queue and retried after the
+			//create has been processed (creates arrive on other threads, so
+			//progress is guaranteed once the creator's message lands).
+			{
+				guid required = NULL_GUID;
+				switch (cmd)
+				{
+				case command_code::CMD_add_preslot:
+					required = get::CMD_add_preslot::destination(m); break;
+				case command_code::CMD_add_postslot:
+					required = get::CMD_add_postslot::source(m); break;
+				case command_code::CMD_satisfy_preslot:
+					required = get::CMD_satisfy_preslot::destination(m); break;
+				case command_code::CMD_satisfy_preslot_with_data:
+					required = get::CMD_satisfy_preslot_with_data::destination(m); break;
+				case command_code::CMD_edt_start_trivial:
+					required = get::CMD_edt_start_trivial::edt_guid(m); break;
+				default: break;
+				}
+				if (required && required.is_local(ctx) && !guided::from_guid(ctx, required))
+				{
+					std::this_thread::yield();
+					communicator::send_local_command(ctx, pm.release());
+					return;
 				}
 			}
 			start_message_processing(ctx, m);
@@ -364,7 +430,9 @@ namespace ocr_tbb
 				event* e;
 				//if (g.is_mapped()) e = object_repository::remove_mapped_object(g, true)->as_event(); -- the event is removed from the map by e->destroy()
 				//else e = object_repository::remove_object(g); -- we don't really delete object at this time
-				e = guided::from_guid(ctx, g)->as_event();
+				guided* obj = g ? guided::from_guid(ctx, g) : 0;
+				if (!obj) break;//destroying a NULL or non-existent object is a no-op (objects are never reclaimed, so a valid GUID cannot miss)
+				e = obj->as_event();
 				e->destroy(ctx);
 				break;
 			}
@@ -374,7 +442,9 @@ namespace ocr_tbb
 				db* e;
 				//if (g.is_mapped()) e = object_repository::remove_mapped_object(g, true)->as_event(); -- the event is removed from the map by e->destroy()
 				//else e = object_repository::remove_object(g); -- we don't really delete object at this time
-				e = guided::from_guid(ctx, g)->as_db();
+				guided* obj = g ? guided::from_guid(ctx, g) : 0;
+				if (!obj) break;//destroying a NULL or non-existent object is a no-op (objects are never reclaimed, so a valid GUID cannot miss)
+				e = obj->as_db();
 				e->synchro().owner__destroy(ctx);
 				break;
 			}

@@ -151,6 +151,21 @@ namespace ocr_tbb
 			bool is_mapped = (properties & GUID_PROP_IS_LABELED) == GUID_PROP_IS_LABELED;
 			bool check = (properties & GUID_PROP_CHECK) == GUID_PROP_CHECK;
 
+			//EDT_PROP_OEVT_VALID: the caller pre-created the output event and
+			//passes it IN through *outputEvent.  The runtime's own output event
+			//(created below) is chained to the caller's event instead of
+			//overwriting *outputEvent, so dependences already registered on the
+			//caller's event fire when this EDT (and, for a FINISH EDT, its
+			//children) completes.
+			ocrGuid_t caller_out_event = NULL_GUID;
+			ocrGuid_t internal_out_event = NULL_GUID;
+			if ((properties & EDT_PROP_OEVT_VALID) == EDT_PROP_OEVT_VALID
+				&& outputEvent && !ocrGuidIsNull(*outputEvent))
+			{
+				caller_out_event = *outputEvent;
+				outputEvent = &internal_out_event;
+			}
+
 			if (ocr_tbb::distributed::runtime::get_current_task(ctx) && ocr_tbb::distributed::runtime::get_current_task(ctx)->finish_for_children())
 			{
 				ocrEventSatisfySlot(ocr_tbb::distributed::runtime::get_current_task(ctx)->finish_for_children(), NULL_GUID, OCR_EVENT_LATCH_INCR_SLOT);
@@ -160,6 +175,8 @@ namespace ocr_tbb
 				ocr_tbb::distributed::guid g = *guid;
 				assert(g.is_mapped());
 				ocr_tbb::distributed::communicator::create_remote_mapped_edt(ctx, g, templateGuid, paramc, paramv, depc, depv, properties, affinity, outputEvent);
+				if (!ocrGuidIsNull(caller_out_event))
+					ocrAddDependence(internal_out_event, caller_out_event, 0, DB_DEFAULT_MODE);
 				return 0;
 			}
 #if(ROUND_ROBIN_AFFINITY)
@@ -180,11 +197,15 @@ namespace ocr_tbb
 					assert(aff.get_node_id() < ocr_tbb::distributed::communicator::number_of_nodes());
 					ocr_tbb::distributed::communicator::create_remote_edt(ctx, aff.get_node_id(), guid, templateGuid, paramc, paramv, depc, depv, properties, affinity, outputEvent);
 					ocr_tbb::logging::log::event("ocrEdtCreate")(*guid)(paramc)(depc)(properties)(affinity)(outputEvent ? *outputEvent : NULL_GUID);
+					if (!ocrGuidIsNull(caller_out_event))
+						ocrAddDependence(internal_out_event, caller_out_event, 0, DB_DEFAULT_MODE);
 					return 0;
 				}
 			}
 			ocr_tbb::distributed::communicator::create_remote_edt(ctx, ocr_tbb::distributed::compute_node::get_my_id(ctx), guid, templateGuid, paramc, paramv, depc, depv, properties, affinity, outputEvent);
 			ocr_tbb::logging::log::event("ocrEdtCreate")(*guid)(paramc)(depc)(properties)(affinity)(outputEvent ? *outputEvent : NULL_GUID);
+			if (!ocrGuidIsNull(caller_out_event))
+				ocrAddDependence(internal_out_event, caller_out_event, 0, DB_DEFAULT_MODE);
 			/*
 			ocr_tbb::distributed::guid g1(templateGuid);
 			ocr_tbb::distributed::guided* obj = ocr_tbb::distributed::guided::ensure(ctx, g1);
@@ -474,6 +495,7 @@ u8 ocrDbRelease(ocrGuid_t db)
 
 u8 ocrDbDestroy(ocrGuid_t db)
 {
+	if (ocrGuidIsNull(db)) return OCR_EINVAL;//destroying NULL_GUID is invalid input, not a runtime command
 	ocr_tbb::distributed::thread_context* ctx = ocr_tbb::distributed::thread_context::get_local();
 	ocr_tbb::logging::log::event("ocrDbDestroy")(db);
 	if (ocr_tbb::distributed::runtime::get_current_task(ctx) && ocr_tbb::distributed::runtime::get_current_task(ctx)->in_group())
