@@ -451,6 +451,13 @@ namespace ocr_tbb
 		mpi_communicator::~mpi_communicator()
 		{
 			thread_context* ctx = thread_context::get_local();
+			//Quiesce the task pool before starting the teardown: receiver
+			//threads hand incoming work (task starts, completion cascades,
+			//data-block destroy fan-outs) to pool threads asynchronously, so
+			//returning from the shutdown wait does not mean those tasks have
+			//finished.  Wait while the communication channels are still alive,
+			//so a task that needs a reply (e.g. a blocking fetch) can complete.
+			if (tbb::task_group* tg = ocr_tbb::distributed::runtime::get_task_group()) tg->wait();
 			for (std::size_t i = 0; i < threads_.size(); ++i)
 			{
 				message m(ctx, command_code::CMD_exit, compute_node::get_my_id(ctx), (node_id)i);
@@ -469,6 +476,10 @@ namespace ocr_tbb
 				threads_[i]->join();
 				threads_fetch_[i]->join();
 			}
+			//The messages drained ahead of CMD_exit may have spawned more pool
+			//tasks; wait for them before unsetting the communicator, or their
+			//outgoing sends would dereference it after it is gone.
+			if (tbb::task_group* tg = ocr_tbb::distributed::runtime::get_task_group()) tg->wait();
 			ocr_tbb::distributed::runtime::finalize();//unset the communicator, so that if it is used we get a hard crash
 			MPI_Finalize();
 		}
