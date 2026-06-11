@@ -560,6 +560,7 @@ u8 ocrDbCreate(ocrGuid_t *db, void** addr, u64 len, u16 flags, ocrHint_t* hint, 
 
 u8 ocrDbRelease(ocrGuid_t db)
 {
+	if (ocrGuidIsNull(db)) return OCR_EINVAL;//releasing NULL_GUID is invalid input, not a runtime command
 	ocr_tbb::distributed::thread_context* ctx = ocr_tbb::distributed::thread_context::get_local();
 	ocr_tbb::logging::log::event("ocrDbRelease")(db);
 	if (ocr_tbb::distributed::runtime::get_current_task(ctx) && ocr_tbb::distributed::runtime::get_current_task(ctx)->in_group())
