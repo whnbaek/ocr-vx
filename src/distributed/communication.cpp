@@ -268,7 +268,7 @@ namespace ocr_tbb
 			guid edt_guid = object_cache::reserve_guid(ctx, to);
 			guid event_guid = object_cache::reserve_guid(ctx, to);
 			send::CMD_edt_create(ctx, to, templateGuid, paramc, depc, properties, affinity, paramv, (guid*)depv, edt_guid, event_guid, runtime::get_current_task(ctx) ? runtime::get_current_task(ctx)->finish_for_children() : 0);
-			*edt_guid_out = edt_guid;
+			if (edt_guid_out) *edt_guid_out = edt_guid;
 			if (outputEvent) *outputEvent = event_guid;
 		}
 		void communicator_base::create_remote_mapped_edt(thread_context* ctx, guid edt_guid, ocrGuid_t templateGuid, u32 paramc, u64* paramv, u32 depc, ocrGuid_t *depv, u16 properties, ocrGuid_t affinity, ocrGuid_t *outputEvent)
@@ -284,7 +284,7 @@ namespace ocr_tbb
 			guid edt_guid = object_cache::reserve_guid(to);
 			guid event_guid = object_cache::reserve_guid(to);
 			send::CMD_opencl_edt_create(to, templateGuid, paramc, depc, properties, affinity, paramv, (guid*)depv, edt_guid, event_guid, runtime::get_current_task() ? runtime::get_current_task()->finish_for_children() : 0, data);
-			*edt_guid_out = edt_guid;
+			if (edt_guid_out) *edt_guid_out = edt_guid;
 			if (outputEvent) *outputEvent = event_guid;
 		}
 #endif

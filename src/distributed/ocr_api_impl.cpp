@@ -196,14 +196,14 @@ namespace ocr_tbb
 				{
 					assert(aff.get_node_id() < ocr_tbb::distributed::communicator::number_of_nodes());
 					ocr_tbb::distributed::communicator::create_remote_edt(ctx, aff.get_node_id(), guid, templateGuid, paramc, paramv, depc, depv, properties, affinity, outputEvent);
-					ocr_tbb::logging::log::event("ocrEdtCreate")(*guid)(paramc)(depc)(properties)(affinity)(outputEvent ? *outputEvent : NULL_GUID);
+					ocr_tbb::logging::log::event("ocrEdtCreate")(guid ? *guid : NULL_GUID)(paramc)(depc)(properties)(affinity)(outputEvent ? *outputEvent : NULL_GUID);
 					if (!ocrGuidIsNull(caller_out_event))
 						ocrAddDependence(internal_out_event, caller_out_event, 0, DB_DEFAULT_MODE);
 					return 0;
 				}
 			}
 			ocr_tbb::distributed::communicator::create_remote_edt(ctx, ocr_tbb::distributed::compute_node::get_my_id(ctx), guid, templateGuid, paramc, paramv, depc, depv, properties, affinity, outputEvent);
-			ocr_tbb::logging::log::event("ocrEdtCreate")(*guid)(paramc)(depc)(properties)(affinity)(outputEvent ? *outputEvent : NULL_GUID);
+			ocr_tbb::logging::log::event("ocrEdtCreate")(guid ? *guid : NULL_GUID)(paramc)(depc)(properties)(affinity)(outputEvent ? *outputEvent : NULL_GUID);
 			if (!ocrGuidIsNull(caller_out_event))
 				ocrAddDependence(internal_out_event, caller_out_event, 0, DB_DEFAULT_MODE);
 			/*
@@ -219,7 +219,7 @@ namespace ocr_tbb
 			new ocr_tbb::distributed::edt(ctx, g, g1, obj->as_edt_template(), paramc, paramv, depc, (ocr_tbb::distributed::guid*)depv, properties, affinity, event, ocr_tbb::distributed::guided::from_guid(ctx, event)->as_event(), ocr_tbb::distributed::runtime::get_current_task(ctx) ? ocr_tbb::distributed::runtime::get_current_task(ctx)->finish_for_children() : 0);
 			*guid = g.as_ocr_guid();
 			DEBUG_COUT(ocr_tbb::distributed::compute_node::get_my_id() << ": created EDT " << g << " from template " << g1 << " " << obj->as_edt_template()->name_);
-			ocr_tbb::logging::log::event("ocrEdtCreate")(*guid)(paramc)(depc)(properties)(affinity)(outputEvent ? *outputEvent : NULL_GUID);
+			ocr_tbb::logging::log::event("ocrEdtCreate")(guid ? *guid : NULL_GUID)(paramc)(depc)(properties)(affinity)(outputEvent ? *outputEvent : NULL_GUID);
 			*/
 			return 0;
 		}
@@ -864,6 +864,18 @@ u8 ocrGuidRangeCreate(ocrGuid_t *rangeGuid, u64 numberGuid, ocrGuidUserKind kind
 	ocr_tbb::distributed::thread_context* ctx = ocr_tbb::distributed::thread_context::get_local();
 	u64 id = ocr_tbb::distributed::communicator::send_and_wait::CMD_allocate_map_id(ctx);
 	*rangeGuid = ocr_tbb::distributed::guid(id, ocr_tbb::distributed::guid::map_tag()).as_ocr_guid();
+	return 0;
+}
+
+u8 ocrGuidMapDestroy(ocrGuid_t mapGuid)
+{
+	// A labeled range is identified by a monotonic map id; the runtime holds
+	// no per-map resource to reclaim at this point.  The labeled objects
+	// placed into the range are torn down by the application through their own
+	// object-kind destroy calls.  Validate the guid and report success.
+	if (ocrGuidIsNull(mapGuid)) return 0;
+	ocr_tbb::distributed::guid mg(mapGuid);
+	assert(mg.is_map());
 	return 0;
 }
 
