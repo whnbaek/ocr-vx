@@ -1561,6 +1561,29 @@ namespace ocr_tbb
 
 			void realse_data_and_notify_postslots(thread_context* ctx)
 			{
+				//An EDT's completion notifications must not overtake the messages
+				//the EDT sent while it was running.  Outgoing messages are tagged
+				//with the sending EDT's guid (the message constructor reads the
+				//thread's current task) and each sender-EDT stream is delivered
+				//in order by the confirmation protocol.  This function, however,
+				//may execute inside a message handler (the handler of the last
+				//remote-data update acknowledgement), where there is no current
+				//task: the completion satisfies would then go out on a different
+				//stream than the EDT's own sends and may be delivered ahead of
+				//them.  For a FINISH scope that reorders the parent latch
+				//decrement before the child increments the parent sent earlier,
+				//so the latch transiently reaches zero and the scope opens early.
+				//Run the completion with the completed EDT as the current task
+				//(and without the handler's message context, which would re-tag
+				//the sends) so its satisfies join the EDT's own stream.
+				message_header saved_message = ctx->message_being_processed;
+				bool saved_forwarded = ctx->message_was_forwarded;
+				guid saved_as_edt = ctx->message_as_edt;
+				edt* saved_task = ctx->current_edt;
+				ctx->message_being_processed = message_header();
+				ctx->message_was_forwarded = false;
+				ctx->message_as_edt = NULL_GUID;
+				ctx->current_edt = this;
 				release_all__locked(ctx);
 				logging::log::event("edt.released")(self_.as_ocr_guid());
 				for (std::size_t i = 0; i < postslots_.size(); ++i)
@@ -1568,6 +1591,10 @@ namespace ocr_tbb
 					ocrEventSatisfySlot_internal(ctx, postslots_[i].node, result_, postslots_[i].slot);
 				}
 				logging::log::event("edt.triggered")(self_.as_ocr_guid());
+				ctx->message_being_processed = saved_message;
+				ctx->message_was_forwarded = saved_forwarded;
+				ctx->message_as_edt = saved_as_edt;
+				ctx->current_edt = saved_task;
 				//ocrEventSatisfySlot(event_guid_, result, 0);
 			}
 
