@@ -450,20 +450,10 @@ namespace ocr_tbb
 				tbb::spin_mutex::scoped_lock lock(mutex);
 				if (log_stream) (*log_stream) << "master__handle_writer_finished(" << task.get_self() << ")" << std::endl;
 				if (!has_copylist) return true;//only relevant to the node that owns the copylist
-				if (copylist.size() > 0 || master_data.pending_invalidations.load() > 0)
+				if (copylist.size() > 0 || master_data.pending_invalidations.load() > 0 || master_data.pending_copies.load() > 0)
 				{
-					if (master_data.tasks_waiting_for_invalidation.size() == 0)
-					{
-						//invalidation wasn't started yet
-						master_data.pending_invalidations = static_cast<u32>(copylist.size());
-						for (copylist_type::iterator it = copylist.begin(); it != copylist.end(); ++it)
-						{
-							communicator::send::CMD_db_invalidate_copy(ctx, *it, self);
-							if (log_stream) (*log_stream) << "CMD_db_invalidate_copy(" << (*it) << ")" << std::endl;
-						}
-					}
 					master_data.tasks_waiting_for_invalidation.push_back(task.get_self());
-					copylist.clear();
+					master__try_start_invalidation_round__locked(ctx);
 					master__update_master_state__locked(ctx);
 					return false;
 				}

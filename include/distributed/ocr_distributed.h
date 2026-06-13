@@ -487,6 +487,28 @@ namespace ocr_tbb
 				}
 				bool master__handle_writer_finished(thread_context* ctx, edt& task);
 				void master__handle_invalidation(thread_context* ctx);
+				void master__try_start_invalidation_round__locked(thread_context* ctx)
+				{
+					//Invalidations for finished writers may only go out once every granted
+					//copy has been confirmed received (CMD_db_copy_received): these commands
+					//do not share an ordered stream with CMD_db_data_copy, so an invalidation
+					//issued while a data copy is still in flight can overtake it, the target
+					//acknowledges the invalidation without holding a copy, and the
+					//late-arriving stale copy then installs as valid and is never
+					//invalidated again.  Serializing on the protocol's own acknowledgement
+					//keeps the pair ordered on any transport.
+					if (master_data.tasks_waiting_for_invalidation.empty()) return;
+					if (master_data.pending_invalidations.load() > 0) return;//a round is already in flight
+					if (master_data.pending_copies.load() > 0) return;//deferred until CMD_db_copy_received
+					assert(copylist.size() > 0);
+					master_data.pending_invalidations = static_cast<u32>(copylist.size());
+					for (copylist_type::iterator it = copylist.begin(); it != copylist.end(); ++it)
+					{
+						communicator::send::CMD_db_invalidate_copy(ctx, *it, self);
+						if (log_stream) (*log_stream) << "CMD_db_invalidate_copy(" << (*it) << ")" << std::endl;
+					}
+					copylist.clear();
+				}
 
 				bool copylist_can_be_released(thread_context* ctx)
 				{
@@ -590,6 +612,7 @@ namespace ocr_tbb
 					assert(master_data.pending_copies.load() > 0);
 					if (--master_data.pending_copies == 0)
 					{
+						master__try_start_invalidation_round__locked(ctx);
 						master__update_master_state__locked(ctx);
 					}
 				}
