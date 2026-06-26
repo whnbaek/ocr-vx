@@ -15,6 +15,7 @@
 #include <tbb/concurrent_vector.h>
 #include <tbb/enumerable_thread_specific.h>
 #include <tbb/concurrent_hash_map.h>
+#include "threadqueue.h"
 #include <tbb/scalable_allocator.h>
 #include <tbb/task.h>
 #include <memory>
@@ -138,6 +139,17 @@ namespace ocr_tbb
 			return guided::read(ot, g, r);
 		}
 
+
+		// A mid-body ocrDbRelease blocks on its own gate until the write-back
+		// invalidation round it triggered is fully acknowledged.  OCR-Vx-native
+		// condvar (the same primitive threadqueue blocks on) -- NOT a POSIX sem.
+		struct release_gate
+		{
+			tbb::native_mutex             m;
+			tbb::native_condition_varible cv;
+			bool                          done;
+			release_gate() : done(false) {}
+		};
 
 		struct db : public guided
 		{
@@ -485,7 +497,7 @@ namespace ocr_tbb
 					command_processor::stop_message_processing(ctx);//the following messages do not depend on the inital command
 					owner__request_elevation__locked(ctx, node_id(-2), command_processor::db_states::DBS_master);
 				}
-				bool master__handle_writer_finished(thread_context* ctx, edt& task);
+				bool master__handle_writer_finished(thread_context* ctx, edt& task, release_gate* blocking_gate = NULL);
 				void master__handle_invalidation(thread_context* ctx);
 				void master__try_start_invalidation_round__locked(thread_context* ctx)
 				{
@@ -497,7 +509,7 @@ namespace ocr_tbb
 					//late-arriving stale copy then installs as valid and is never
 					//invalidated again.  Serializing on the protocol's own acknowledgement
 					//keeps the pair ordered on any transport.
-					if (master_data.tasks_waiting_for_invalidation.empty()) return;
+					if (master_data.tasks_waiting_for_invalidation.empty() && master_data.release_waiters.empty()) return;
 					if (master_data.pending_invalidations.load() > 0) return;//a round is already in flight
 					if (master_data.pending_copies.load() > 0) return;//deferred until CMD_db_copy_received
 					assert(copylist.size() > 0);
@@ -899,6 +911,7 @@ namespace ocr_tbb
 					std::atomic<u32> pending_copies;
 					std::atomic<u32> pending_invalidations;
 					std::list<guid> tasks_waiting_for_invalidation;
+					std::list<release_gate*> release_waiters;
 					copy_waitlist_type copy_waitlist;
 					std::atomic<master_state> state;
 				};

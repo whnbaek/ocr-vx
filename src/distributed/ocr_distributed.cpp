@@ -398,8 +398,6 @@ namespace ocr_tbb
 
 		void edt::release_db_early(thread_context* ctx, guid db_guid)
 		{
-			//edt is locked
-			//assert(acquired_data_count_ > 1); - this may be here for a reason, making sure that data block management at the end of the EDT works properly!
 			for (std::size_t i = 0; i < ordered_guids_.size(); ++i)
 			{
 				if (ordered_guids_[i] != db_guid) continue;
@@ -407,11 +405,24 @@ namespace ocr_tbb
 				db* obj = guided::from_guid(ctx, db_guid)->as_db();
 				if (mode == DB_MODE_EW || mode == DB_MODE_RW)
 				{
-					if (obj->synchro().master__handle_writer_finished(ctx, *this))
+					// Synchronous release: if read-copies are outstanding,
+					// master__handle_writer_finished starts the invalidation round, registers
+					// &gate in release_waiters, and returns false.  Block here (no lock held)
+					// until master__handle_invalidation signals the gate once every
+					// CMD_db_copy_invalidated is in, so any post-release cross-node hand-off
+					// (satisfy / addDependence) observes the released writes.
+					release_gate gate;
+					if (!obj->synchro().master__handle_writer_finished(ctx, *this, &gate))
 					{
-						--acquired_data_count_;
-						assert(acquired_data_count_ > 0);
+						tbb::native_mutex::scoped_lock glock(gate.m);
+						while (!gate.done)
+						{
+							gate.cv.wait(gate.m, 1000);//1s cadence to re-check teardown, not an ACK timeout
+							if (!gate.done && !runtime::is_running(ctx)) break;//teardown: ACK will never come
+						}
 					}
+					--acquired_data_count_;
+					assert(acquired_data_count_ > 0);
 				}
 				else --acquired_data_count_;
 				obj->synchro().unlock(ctx, self_, mode);
@@ -444,7 +455,7 @@ namespace ocr_tbb
 			}
 		}
 
-		bool db::synchro_data::master__handle_writer_finished(thread_context* ctx, edt& task)
+		bool db::synchro_data::master__handle_writer_finished(thread_context* ctx, edt& task, release_gate* blocking_gate)
 		{
 			{
 				tbb::spin_mutex::scoped_lock lock(mutex);
@@ -452,7 +463,10 @@ namespace ocr_tbb
 				if (!has_copylist) return true;//only relevant to the node that owns the copylist
 				if (copylist.size() > 0 || master_data.pending_invalidations.load() > 0 || master_data.pending_copies.load() > 0)
 				{
-					master_data.tasks_waiting_for_invalidation.push_back(task.get_self());
+					if (blocking_gate != NULL)
+						master_data.release_waiters.push_back(blocking_gate);
+					else
+						master_data.tasks_waiting_for_invalidation.push_back(task.get_self());
 					master__try_start_invalidation_round__locked(ctx);
 					master__update_master_state__locked(ctx);
 					return false;
@@ -478,11 +492,19 @@ namespace ocr_tbb
 				//invalidation done
 				std::list<guid> tasks;
 				tasks.swap(master_data.tasks_waiting_for_invalidation);
+				std::list<release_gate*> gates;
+				gates.swap(master_data.release_waiters);
 				master__update_master_state__locked(ctx);
 				lock.release();//the handle_remote_updated may want to lock this data block, so move the list to a private copy and unlock
 				for (std::list<guid>::iterator it = tasks.begin(); it != tasks.end(); ++it)
 				{
 					guided::from_guid(ctx, *it)->as_edt()->handle_remote_updated(ctx);
+				}
+				for (std::list<release_gate*>::iterator it = gates.begin(); it != gates.end(); ++it)
+				{
+					tbb::native_mutex::scoped_lock glock((*it)->m);
+					(*it)->done = true;
+					(*it)->cv.broadcast();
 				}
 				//tasks_waiting_for_invalidation.clear(); -- no need to clear, was cleared by the swap with an empty list
 			}
