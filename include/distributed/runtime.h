@@ -332,13 +332,18 @@ namespace ocr_tbb
 			}
 			static void notify_barrier(thread_context* ctx)
 			{
-				if (--the(ctx).barrier_count_ == 0)
+				// Monotonic arrival counter: every N-th CMD_barrier completes one
+				// round.  A countdown-with-reset has a window between hitting 0 and
+				// the reset in which an already-released rank's next-round
+				// CMD_barrier is lost, leaving the next round permanently one short
+				// (count stuck above 0, release never broadcast).  Counting up and
+				// releasing on each multiple of N has no reset to race against.
+				if ((++the(ctx).barrier_count_) % communicator::number_of_nodes() == 0)
 				{
 					for (node_id i = 0; i < communicator::number_of_nodes(); ++i)
 					{
 						communicator::send::CMD_barrier_done(ctx, i);
 					}
-					the(ctx).barrier_count_ = communicator::number_of_nodes();
 				}
 			}
 			static void notify_barrier_done(thread_context* ctx)
@@ -438,7 +443,7 @@ namespace ocr_tbb
 				was_shut_down_(false)
 			{
 				map_sequence_id_ = 1;
-				barrier_count_ = number_of_nodes;
+				barrier_count_ = 0;   // monotonic arrival counter (see notify_barrier)
 			}
 			template<typename Writer>
 			static void write(Writer& w);
