@@ -8,6 +8,7 @@
 #define OCR_TBB_distributed__mpi_communicator_H_GUARD
 
 #include <limits>
+#include <atomic>
 
 #if (OCR_USE_MPI)
 
@@ -52,6 +53,7 @@ namespace ocr_tbb
 			}
 			void internal_send_message(thread_context* ctx, const message& m) OVERRIDE
 			{
+				++wire_sent_;
 				tbb::spin_mutex::scoped_lock lock(internal_mutex(ctx, m.main.to));
 				internal_send_message__locked(ctx, m);
 			}
@@ -97,6 +99,7 @@ namespace ocr_tbb
 					MPI_Get_count(&stat, MPI_CHAR, &count);
 					assert(count == followup_size);
 				}
+				++wire_received_;
 				return m.main.cmd;
 			}
 			command internal_get_fetch_command(thread_context* ctx, node_id from, message& m) OVERRIDE
@@ -144,6 +147,9 @@ namespace ocr_tbb
 			}
 		private:
 			MPI_Comm comm_;
+			MPI_Comm drain_comm_;
+			std::atomic<unsigned long long> wire_sent_{0};
+			std::atomic<unsigned long long> wire_received_{0};
 			struct spin_mutex_holder
 			{
 				//Copy-able mutex, whicha actually does not copy it. This is to be able to put mutexes into containers

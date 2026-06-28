@@ -278,21 +278,21 @@ namespace ocr_tbb
 				}
 				if (required && required.is_local(ctx) && !guided::from_guid(ctx, required))
 				{
-					//A mapped (labeled) GUID is the documented case above: it is
-					//legitimately referenced before its create has been processed
-					//here.  Holding this message's confirmation until the retry
-					//finally processes it would stall the whole sender-EDT stream
-					//for the wait — and the awaited create can itself DEPEND on
-					//that stream (the creator may only run once a message held
-					//behind this one is delivered), turning the wait into a cycle
-					//that never resolves.  Deferral already commits this node to
-					//eventually process the message, so confirm it now (through
-					//the regular confirmation switch) and strip its stream id;
-					//the retried processing then skips the already-sent
-					//confirmation (id == 0), and the sender's stream advances
-					//while the message waits for the create.  Non-mapped GUIDs
-					//keep the strict processed-in-order confirmation.
-					if (required.is_mapped() && pm->main.id != 0)
+					//The referenced object is local but its create has not been
+					//processed here yet, so this message must wait.  Holding its
+					//confirmation until the retry finally processes it would stall
+					//the whole sender-EDT stream for the wait — and the awaited
+					//create can itself DEPEND on that stream (the creator may only
+					//run once a message held behind this one is delivered), turning
+					//the wait into a cycle that never resolves.  Deferral already
+					//commits this node to eventually process the message, so confirm
+					//it now (through the regular confirmation switch) and strip its
+					//stream id; the retried processing then skips the already-sent
+					//confirmation (id == 0), and the sender's stream advances while
+					//the message waits for the create.  This holds for any deferred
+					//reference (mapped or not): the stall-cycle does not depend on
+					//whether the awaited GUID is labeled.
+					if (pm->main.id != 0)
 					{
 						start_message_processing(ctx, *pm);
 						stop_message_processing(ctx);

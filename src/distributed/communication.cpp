@@ -439,6 +439,7 @@ namespace ocr_tbb
 			}
 			mutexes_.resize(size);
 			mutexes_fetch_.resize(size);
+			MPI_Comm_dup(comm_, &drain_comm_);
 			ocr_tbb::distributed::runtime::initialize((ocr_tbb::distributed::node_id)rank, (std::size_t)size, this);
 			for (std::size_t i = 0; i < size; ++i)
 			{
@@ -461,22 +462,22 @@ namespace ocr_tbb
 			//otherwise a confirmation a peer still needs could be stranded in
 			//a stopped sender's queue and the peer would wait for it forever.
 			//
-			//Each round first reaches a LOCAL fixpoint: wait for the task
-			//pool (receiver threads hand incoming work to pool threads
-			//asynchronously, and that work may send more messages), then
-			//re-check the counters, repeating until both hold at once.  A
-			//single barrier over local fixpoints is not enough: a message
-			//arriving between the local check and the barrier is processed
-			//while its receiver is already waiting in the barrier, and the
-			//follow-up messages that processing sends would go unaccounted.
-			//Such a message's SENDER, however, is still unconfirmed and thus
-			//still in its own fixpoint loop, so the first barrier guarantees
-			//every message sent before it has been fully processed.  The
-			//second round then drains the bounded chain of follow-ups that
-			//slipped into that window; after it no node can produce another
-			//message.  The final fixpoint absorbs this node's own tail of
-			//that chain before exit is enqueued behind it.
-			for (int round = 0; round < 2; ++round)
+			//A fixed number of rounds cannot guarantee this: the chain of
+			//follow-up messages to absorb deepens with the cross-node message
+			//depth (worse at higher node counts), so a fixed count can stop while
+			//a message is still in flight, stranding a peer's sender on its unsent
+			//count.  Instead each round reaches a LOCAL fixpoint (wait for the task
+			//pool, which receiver threads feed asynchronously and whose work may
+			//send more messages, then re-check the counters) and then reduces, over
+			//all nodes, the wire messages in flight (sent minus received) and the
+			//total wire traffic.  The drain ends only after a full round in which
+			//nothing is in flight AND no node sent anything new -- the point past
+			//which no node can produce another message.  Every node reduces the same
+			//counters, observes the same values, runs the same number of rounds, and
+			//so stays collective.  The reduction is non-blocking and polled so the
+			//receiver threads keep making message-channel progress meanwhile.
+			long long prev_traffic = -1;
+			for (;;)
 			{
 				for (;;)
 				{
@@ -484,13 +485,24 @@ namespace ocr_tbb
 					if (message_layer_quiet(ctx)) break;
 					std::this_thread::yield();
 				}
-				barrier(ctx, 0);
-			}
-			for (;;)
-			{
-				if (tbb::task_group* tg = ocr_tbb::distributed::runtime::get_task_group()) tg->wait();
-				if (message_layer_quiet(ctx)) break;
-				std::this_thread::yield();
+				unsigned long long received_snapshot = wire_received_.load();
+				unsigned long long sent_snapshot = wire_sent_.load();
+				unsigned long long local[2] = { sent_snapshot, received_snapshot };
+				unsigned long long global[2];
+				// Non-blocking: poll so receiver threads keep making MPI progress on the
+				// message channel while this collective is outstanding; a blocking
+				// collective here would starve them and the round could never complete.
+				MPI_Request drain_req;
+				MPI_Iallreduce(local, global, 2, MPI_UNSIGNED_LONG_LONG, MPI_SUM, drain_comm_, &drain_req);
+				for (int done = 0; !done; )
+				{
+					MPI_Test(&drain_req, &done, MPI_STATUS_IGNORE);
+					if (!done) std::this_thread::yield();
+				}
+				long long in_flight = (long long)global[0] - (long long)global[1];
+				long long traffic = (long long)(global[0] + global[1]);
+				if (in_flight == 0 && traffic == prev_traffic) break;
+				prev_traffic = traffic;
 			}
 			for (std::size_t i = 0; i < threads_.size(); ++i)
 			{
@@ -526,6 +538,7 @@ namespace ocr_tbb
 			//outgoing sends would dereference it after it is gone.
 			if (tbb::task_group* tg = ocr_tbb::distributed::runtime::get_task_group()) tg->wait();
 			ocr_tbb::distributed::runtime::finalize();//unset the communicator, so that if it is used we get a hard crash
+			MPI_Comm_free(&drain_comm_);
 			MPI_Finalize();
 		}
 
