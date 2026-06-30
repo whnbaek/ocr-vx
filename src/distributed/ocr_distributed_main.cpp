@@ -21,7 +21,39 @@ extern "C"
 #include <oneapi/tbb/global_control.h>
 #include <oneapi/tbb/info.h>
 #include <chrono>
+#include <cstdio>
+#include <time.h>
 
+namespace ocr_tbb
+{
+	namespace distributed
+	{
+		// Started once, the first time mainEdt becomes eligible to run.
+		static struct timespec g_e2e_start;
+		static std::atomic<bool> g_e2e_started(false);
+
+		void e2e_mark_start()
+		{
+			bool already = g_e2e_started.exchange(true);
+			if (!already) clock_gettime(CLOCK_MONOTONIC, &g_e2e_start);
+		}
+
+		void e2e_report_on_shutdown(thread_context* ctx)
+		{
+			if (compute_node::get_my_id(ctx) != 0) return;
+			if (!g_e2e_started.exchange(false)) return; // report once
+			// Gated by $ARTS_E2E_MARKER: emit only when the measurement harness
+			// requests it, so a normal run's stderr is never perturbed.
+			if (!getenv("ARTS_E2E_MARKER")) return;
+			struct timespec now;
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			long long ns = (long long)(now.tv_sec - g_e2e_start.tv_sec) * 1000000000LL
+				+ (now.tv_nsec - g_e2e_start.tv_nsec);
+			fprintf(stderr, "[E2E] %lld\n", ns);
+			fflush(stderr);
+		}
+	}
+}
 
 #if (SIMULATE_MULTIPLE_NODES)
 std::vector<std::shared_ptr<ocr_tbb::distributed::runtime> > ocr_tbb::distributed::runtime::runtimes_;
@@ -384,6 +416,10 @@ static void launcher_body()
 	ocrEdtTemplateCreate(&main_template, mainEdt, 0, 1);
 
 	ocr_tbb::distributed::ocrEdtCreate_affinity(&main, main_template, 0, 0, 1, 0, 0, ocr_tbb::distributed::guid(ocr_tbb::distributed::communicator::number_of_nodes() - 1, 1).as_ocr_guid(), 0);
+
+	// mainEdt is now eligible to run: start the end-to-end timer.
+	ocr_tbb::distributed::e2e_mark_start();
+
 	ocrAddDependence(args, main, 0, DB_MODE_RW);
 	tg->wait();
 	// Like the original spawn_root_and_wait root task, task_group/barrier are not destroyed

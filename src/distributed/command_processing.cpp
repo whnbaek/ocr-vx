@@ -322,6 +322,9 @@ namespace ocr_tbb
 			}
 			case command_code::CMD_shutdown:
 				runtime::shutdown(ctx);
+				// Shutdown received, teardown about to begin: stop the
+				// end-to-end timer on the master node only.
+				e2e_report_on_shutdown(ctx);
 				break;
 			case command_code::CMD_pull_object:
 			{

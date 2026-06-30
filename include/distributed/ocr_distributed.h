@@ -63,6 +63,14 @@ namespace ocr_tbb
 			u32 paramc, u64* paramv, u32 depc, ocrGuid_t *depv,
 			u16 properties, ocrGuid_t affinity, ocrGuid_t *outputEvent);
 
+		// End-to-end wall-clock span: mark the start once mainEdt becomes
+		// eligible to run (idempotent - first caller wins), and report the
+		// elapsed span to stderr as "[E2E] <nanoseconds>\n" on shutdown
+		// reception, master node only (no-op elsewhere, or if the start was
+		// never marked).
+		void e2e_mark_start();
+		void e2e_report_on_shutdown(thread_context* ctx);
+
 
 		struct guided
 		{
